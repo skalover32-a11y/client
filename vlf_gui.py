@@ -1048,7 +1048,7 @@ class VlfGui(tk.Tk):
             "sniff_override_destination": True,
         }
 
-        # legacy-формат DNS — будет только WARN, но не FATAL
+        # legacy DNS – даёт только WARN, но не FATAL
         dns = {
             "servers": [
                 {
@@ -1061,7 +1061,7 @@ class VlfGui(tk.Tk):
             "disable_cache": False,
         }
 
-        # Никаких transport / fingerprint и т.п. — только то, что точно понимает 1.12.12
+        # VLESS без transport/fingerprint и других новых фич
         outbound_proxy = {
             "type": "vless",
             "tag": "proxy-out",
@@ -1086,18 +1086,14 @@ class VlfGui(tk.Tk):
         outbound_block = {"type": "block", "tag": "block"}
 
         rules = [
-            # DNS всегда через dns-out
+            # DNS всегда в dns-out
             {"protocol": "dns", "outbound": "dns-out"},
         ]
 
-        # Режим РФ: русские IP + русские домены напрямую
+        # Режим РФ: все домены *.ru – напрямую
         if exclusions.ru_mode:
             rules.append({
-                "geoip": ["ru"],
-                "outbound": "direct",
-            })
-            rules.append({
-                "geosite": ["category-ru"],
+                "domain_suffix": ["ru"],
                 "outbound": "direct",
             })
 
@@ -1119,7 +1115,7 @@ class VlfGui(tk.Tk):
                 "outbound": "direct",
             })
 
-        # Сам VPN-сервер не должен ходить через туннель
+        # Адрес сервера сам не должен идти через туннель
         try:
             socket.inet_aton(server_addr)
             rules.append({
@@ -1144,6 +1140,7 @@ class VlfGui(tk.Tk):
             },
         }
         return config
+
 
 
     # ---------- запуск / остановка sing-box ----------
