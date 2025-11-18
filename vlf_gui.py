@@ -1033,7 +1033,6 @@ class VlfGui(tk.Tk):
         security = vless["security"]
         sni = vless["sni"]
         flow = vless["flow"]
-        _network = (vless["network"] or "tcp").lower()
 
         tun_addr = "172.19.0.2/30"
 
@@ -1049,7 +1048,7 @@ class VlfGui(tk.Tk):
             "sniff_override_destination": True,
         }
 
-        # legacy DNS формат – даёт только WARN в 1.12.12, но не FATAL
+        # legacy-формат DNS — будет только WARN, но не FATAL
         dns = {
             "servers": [
                 {
@@ -1062,6 +1061,7 @@ class VlfGui(tk.Tk):
             "disable_cache": False,
         }
 
+        # Никаких transport / fingerprint и т.п. — только то, что точно понимает 1.12.12
         outbound_proxy = {
             "type": "vless",
             "tag": "proxy-out",
@@ -1086,52 +1086,65 @@ class VlfGui(tk.Tk):
         outbound_block = {"type": "block", "tag": "block"}
 
         rules = [
+            # DNS всегда через dns-out
             {"protocol": "dns", "outbound": "dns-out"},
         ]
 
-        rules.append({"rule_set": ["geoip-ru"], "outbound": "direct"})
+        # Режим РФ: русские IP + русские домены напрямую
+        if exclusions.ru_mode:
+            rules.append({
+                "geoip": ["ru"],
+                "outbound": "direct",
+            })
+            rules.append({
+                "geosite": ["category-ru"],
+                "outbound": "direct",
+            })
 
+        # Исключения – сайты
         for site in exclusions.sites:
             host = site.strip()
             if not host:
                 continue
-            rules.append({"domain": [host], "outbound": "direct"})
+            rules.append({
+                "domain": [host],
+                "outbound": "direct",
+            })
 
+        # Исключения – программы
         for app in exclusions.apps:
             exe_name = os.path.basename(app)
-            rules.append({"process_name": exe_name, "outbound": "direct"})
+            rules.append({
+                "process_name": exe_name,
+                "outbound": "direct",
+            })
 
-        if exclusions.ru_mode:
-            rules.append({"rule_set": ["geosite-ru"], "outbound": "direct"})
-
+        # Сам VPN-сервер не должен ходить через туннель
         try:
             socket.inet_aton(server_addr)
-            rules.append({"ip_cidr": [f"{server_addr}/32"], "outbound": "direct"})
+            rules.append({
+                "ip_cidr": [f"{server_addr}/32"],
+                "outbound": "direct",
+            })
         except OSError:
-            rules.append({"domain": [server_addr], "outbound": "direct"})
+            rules.append({
+                "domain": [server_addr],
+                "outbound": "direct",
+            })
 
         config = {
-            "log": {"level": "info"},
+            "log": {
+                "level": "info",
+            },
             "dns": dns,
             "inbounds": [inbound_tun],
             "outbounds": [outbound_proxy, outbound_direct, outbound_dns, outbound_block],
             "route": {
                 "rules": rules,
-                "rule_set": [
-                    {
-                        "tag": "geoip-ru",
-                        "type": "geoip",
-                        "country_code": ["RU"],
-                    },
-                    {
-                        "tag": "geosite-ru",
-                        "type": "geosite",
-                        "domain": ["geosite:category-ru"],
-                    },
-                ],
             },
         }
         return config
+
 
     # ---------- запуск / остановка sing-box ----------
 
