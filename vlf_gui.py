@@ -18,10 +18,8 @@ COLOR_PANEL_DARK = "#111827"
 COLOR_TEXT = "#ffffff"
 COLOR_SUBTEXT = "#9ca3af"
 COLOR_ACCENT = "#00d4ff"
-COLOR_ACCENT_MUTED = "#00a6cc"
 COLOR_BAD = "#e11d48"
 COLOR_GOOD = "#22c55e"
-COLOR_BORDER = "#1f2933"
 
 GREEN_BTN = "#22c55e"
 RED_BTN = "#ef4444"
@@ -31,11 +29,6 @@ APP_TITLE = "VLF VPN по подписке"
 PROFILES_FILE = "profiles.json"
 EXCLUSIONS_FILE = "exclusions.json"
 SING_BOX_EXE = "sing-box.exe"
-
-
-def resource_path(relative: str) -> str:
-    base_path = getattr(sys, "_MEIPASS", os.path.dirname(os.path.abspath(__file__)))
-    return os.path.join(base_path, relative)
 
 
 def load_json(path, default):
@@ -122,9 +115,8 @@ class SingBoxRunner(threading.Thread):
 
     def run(self):
         try:
-            # ВАЖНО: включаем поддержку legacy special outbounds,
-            # чтобы sing-box 1.12.12 не падал с FATAL.
             env = os.environ.copy()
+            # На всякий случай разрешаем legacy special outbounds, если они вдруг появятся
             env["ENABLE_DEPRECATED_SPECIAL_OUTBOUNDS"] = "true"
 
             self.proc = subprocess.Popen(
@@ -172,7 +164,7 @@ class VlfGui(tk.Tk):
         self.config_path = self.base_dir / "config.json"
         self.sing_box_path = self.base_dir / SING_BOX_EXE
 
-        self.profiles = []  # list[Profile]
+        self.profiles = []
         self.exclusions = Exclusions()
 
         self.current_profile = None
@@ -185,7 +177,6 @@ class VlfGui(tk.Tk):
 
         self.ru_mode_var = tk.BooleanVar(value=True)
 
-        self.logo_img = None
         self.logo_img_small = None
 
         self._build_ui()
@@ -195,21 +186,6 @@ class VlfGui(tk.Tk):
         self._update_status_view()
 
     # ---------- helpers ----------
-
-    def _load_logo_image(self):
-        # Логотип больше не используем в центре, но оставляю функцию,
-        # на случай если захочешь вернуть картинку.
-        try:
-            from PIL import Image, ImageTk
-
-            img_path = self.base_dir / "vlf_logo_big.png"
-            if not img_path.exists():
-                return
-            img = Image.open(img_path)
-            img = img.resize((220, 220), Image.LANCZOS)
-            self.logo_img = ImageTk.PhotoImage(img)
-        except Exception:
-            self.logo_img = None
 
     def _load_logo_image_small(self):
         try:
@@ -233,20 +209,13 @@ class VlfGui(tk.Tk):
         self.log_text.configure(state="disabled")
 
     def _set_status(self, text: str, good: bool | None = None):
+        # статус оставляем логическим, но не выводим "отключен"/"подключен" в GUI
         self.status_var.set(text)
-        if good is None:
-            color = COLOR_SUBTEXT
-        elif good:
-            color = COLOR_GOOD
-        else:
-            color = COLOR_BAD
-        # label у нас есть, но он не показывается – это ок
-        self.status_label.configure(fg=color)
 
     def _set_ip(self, ip: str):
         self.ip_var.set(f"IP: {ip}")
 
-    # ---------- небольшие фабрики виджетов ----------
+    # ---------- фабрики виджетов ----------
 
     def _create_pill_button(self, parent, text, bg, command=None):
         btn = tk.Button(
@@ -263,13 +232,10 @@ class VlfGui(tk.Tk):
             pady=6,
             font=("Segoe UI", 10, "bold"),
         )
-        btn.configure(
-            highlightthickness=0,
-        )
+        btn.configure(highlightthickness=0)
         return btn
 
     def _create_icon_button(self, parent, text, command=None):
-        """Компактная кнопка для редактирования/удаления в блоках исключений."""
         btn = tk.Button(
             parent,
             text=text,
@@ -287,7 +253,7 @@ class VlfGui(tk.Tk):
         )
         return btn
 
-    # ---------- построение UI ----------
+    # ---------- UI ----------
 
     def _build_ui(self):
         self.configure(bg=COLOR_BG)
@@ -298,52 +264,30 @@ class VlfGui(tk.Tk):
             pass
 
         style.configure("TFrame", background=COLOR_BG)
-        style.configure("Header.TFrame", background=COLOR_BG)
         style.configure("Panel.TFrame", background=COLOR_PANEL)
         style.configure("TLabel", background=COLOR_BG, foreground=COLOR_TEXT)
-        style.configure(
-            "Secondary.TLabel",
-            background=COLOR_BG,
-            foreground=COLOR_SUBTEXT,
-        )
-        style.configure(
-            "Panel.TLabel",
-            background=COLOR_PANEL,
-            foreground=COLOR_TEXT,
-        )
-        style.configure(
-            "Accent.TButton",
-            font=("Segoe UI", 9, "bold"),
-            padding=6,
-        )
         style.configure(
             "Small.TCheckbutton",
             background=COLOR_PANEL,
             foreground=COLOR_TEXT,
             font=("Segoe UI", 9),
         )
+        style.configure("Accent.TButton", font=("Segoe UI", 9, "bold"), padding=6)
 
-        # ---------- верхняя полоса с кнопками и логотипом ----------
+        # ВЕРХНЯЯ ПОЛОСА
         header = tk.Frame(self, bg=COLOR_BG)
         header.pack(fill="x", padx=10, pady=(8, 4))
 
-        # Левая часть шапки: три большие кнопки
         left_header = tk.Frame(header, bg=COLOR_BG)
         left_header.pack(side="left", padx=0, pady=4)
 
         self.btn_tun_on = self._create_pill_button(
-            left_header,
-            "Туннель ВКЛ",
-            GREEN_BTN,
-            command=self.on_tun_on,
+            left_header, "Туннель ВКЛ", GREEN_BTN, command=self.on_tun_on
         )
         self.btn_tun_on.pack(side="left")
 
         self.btn_tun_off = self._create_pill_button(
-            left_header,
-            "ВЫКЛ",
-            RED_BTN,
-            command=self.on_tun_off,
+            left_header, "ВЫКЛ", RED_BTN, command=self.on_tun_off
         )
         self.btn_tun_off.pack(side="left", padx=4)
 
@@ -355,65 +299,41 @@ class VlfGui(tk.Tk):
             )
 
         self.btn_proxy = self._create_pill_button(
-            left_header,
-            "Без TUN (прокси)",
-            GRAY_BTN,
-            command=proxy_msg,
+            left_header, "Без TUN (прокси)", GRAY_BTN, command=proxy_msg
         )
         self.btn_proxy.pack(side="left")
 
-        # Правая часть шапки – колонка с логотипом и @ботом
         right_header = tk.Frame(header, bg=COLOR_BG)
         right_header.pack(side="right", padx=0, pady=4)
 
         self._load_logo_image_small()
         if self.logo_img_small is not None:
-            self.logo_label = tk.Label(
-                right_header,
-                image=self.logo_img_small,
-                bg=COLOR_BG,
-                bd=0,
+            tk.Label(right_header, image=self.logo_img_small, bg=COLOR_BG, bd=0).pack(
+                side="top", anchor="e"
             )
         else:
-            self.logo_label = tk.Label(
+            tk.Label(
                 right_header,
                 text="VLF",
                 bg=COLOR_BG,
                 fg=COLOR_ACCENT,
                 font=("Segoe UI", 14, "bold"),
-            )
-        self.logo_label.pack(side="top", anchor="e")
+            ).pack(side="top", anchor="e")
 
-        # кликабельная ссылка на бота
         bot_label = tk.Label(
             right_header,
-            text="@vltfунAT_bot" if False else "@vlftunAT_bot",
+            text="@vlftunAT_bot",
             bg=COLOR_BG,
             fg=COLOR_ACCENT,
             cursor="hand2",
             font=("Segoe UI", 10),
         )
         bot_label.pack(side="top", anchor="e", pady=(4, 0))
-        bot_label.bind(
-            "<Button-1>",
-            lambda e: self._open_telegram_bot(),
-        )
+        bot_label.bind("<Button-1>", lambda e: self._open_telegram_bot())
 
-        # ---------- центральный блок ----------
-        # Убираем логотип и надпись "VLF / отключен".
-        # Оставляем только IP, как ты просил.
+        # IP по центру
         center_frame = tk.Frame(self, bg=COLOR_BG)
-        center_frame.pack(fill="x", padx=10, pady=(0, 8))
-
-        # status_label нужен для логики, но не показываем его.
-        self.status_label = tk.Label(
-            center_frame,
-            textvariable=self.status_var,
-            bg=COLOR_BG,
-            fg=COLOR_BAD,
-            font=("Segoe UI", 10),
-        )
-        # НЕ делаем pack() => визуально не видно
+        center_frame.pack(fill="x", padx=10, pady=(0, 4))
 
         self.ip_label = tk.Label(
             center_frame,
@@ -424,7 +344,7 @@ class VlfGui(tk.Tk):
         )
         self.ip_label.pack(pady=(2, 0))
 
-        # ---------- основной низ: слева профили, справа исключения ----------
+        # ОСНОВНОЙ НИЗ
         main_frame = tk.Frame(self, bg=COLOR_BG)
         main_frame.pack(fill="both", expand=True, padx=10, pady=(4, 8))
 
@@ -452,14 +372,12 @@ class VlfGui(tk.Tk):
             style="Accent.TButton",
             command=self.on_add_profile,
         ).pack(side="left", padx=2)
-
         ttk.Button(
             profile_controls,
             text="Изменить",
             style="Accent.TButton",
             command=self.on_edit_profile,
         ).pack(side="left", padx=2)
-
         ttk.Button(
             profile_controls,
             text="Удалить",
@@ -467,7 +385,6 @@ class VlfGui(tk.Tk):
             command=self.on_delete_profile,
         ).pack(side="left", padx=2)
 
-        # выпадающий список профилей над списком
         combo_frame = tk.Frame(left_panel, bg=COLOR_PANEL)
         combo_frame.pack(fill="x", padx=8, pady=(0, 4))
 
@@ -478,10 +395,8 @@ class VlfGui(tk.Tk):
             font=("Segoe UI", 9),
         )
         self.profile_combo.pack(fill="x")
-
         self.profile_combo.bind("<<ComboboxSelected>>", self.on_profile_selected)
 
-        # список профилей (как в некобоксе)
         self.profile_list = tk.Listbox(
             left_panel,
             height=6,
@@ -496,7 +411,6 @@ class VlfGui(tk.Tk):
         self.profile_list.pack(fill="both", expand=True, padx=8, pady=(0, 8))
         self.profile_list.bind("<<ListboxSelect>>", self.on_profile_list_selected)
 
-        # информационная строка по профилю
         info_frame = tk.Frame(left_panel, bg=COLOR_PANEL_DARK, height=48)
         info_frame.pack(fill="x", padx=0, pady=(0, 0))
         info_frame.pack_propagate(False)
@@ -549,7 +463,6 @@ class VlfGui(tk.Tk):
             style="Accent.TButton",
             command=self.on_add_site,
         ).pack(side="left", padx=2)
-
         ttk.Button(
             exc_top,
             text="Добавить программу",
@@ -557,7 +470,6 @@ class VlfGui(tk.Tk):
             command=self.on_add_app,
         ).pack(side="left", padx=2)
 
-        # Кнопка менеджера исключений
         self.btn_manager = ttk.Button(
             exc_top,
             text="Менеджер",
@@ -574,10 +486,7 @@ class VlfGui(tk.Tk):
         sites_left.pack(side="left", fill="both", expand=True)
 
         tk.Label(
-            sites_left,
-            text="Сайты",
-            bg=COLOR_PANEL,
-            fg=COLOR_TEXT,
+            sites_left, text="Сайты", bg=COLOR_PANEL, fg=COLOR_TEXT
         ).pack(anchor="w", pady=(0, 2))
 
         self.site_list = tk.Listbox(
@@ -605,7 +514,7 @@ class VlfGui(tk.Tk):
             row=2, column=0, pady=2, sticky="n"
         )
 
-        # Приложения
+        # Программы
         apps_frame = tk.Frame(right_panel, bg=COLOR_PANEL)
         apps_frame.pack(fill="both", expand=True, padx=8, pady=(0, 4))
 
@@ -613,10 +522,7 @@ class VlfGui(tk.Tk):
         apps_left.pack(side="left", fill="both", expand=True)
 
         tk.Label(
-            apps_left,
-            text="Программы",
-            bg=COLOR_PANEL,
-            fg=COLOR_TEXT,
+            apps_left, text="Программы", bg=COLOR_PANEL, fg=COLOR_TEXT
         ).pack(anchor="w", pady=(0, 2))
 
         self.app_list = tk.Listbox(
@@ -644,7 +550,6 @@ class VlfGui(tk.Tk):
             row=2, column=0, pady=2, sticky="n"
         )
 
-        # Режим РФ чекбокс
         ru_frame = tk.Frame(right_panel, bg=COLOR_PANEL)
         ru_frame.pack(fill="x", padx=8, pady=(0, 6))
 
@@ -657,7 +562,7 @@ class VlfGui(tk.Tk):
         )
         self.chk_ru_mode.pack(anchor="w")
 
-        # ---------- лог ----------
+        # ЛОГ
         log_frame = tk.Frame(self, bg=COLOR_BG, bd=1, relief="solid")
         log_frame.pack(fill="both", expand=True, padx=10, pady=(0, 10))
 
@@ -683,11 +588,13 @@ class VlfGui(tk.Tk):
         )
         self.log_text.pack(fill="both", expand=True, padx=4, pady=(0, 4))
 
-        x_scroll = tk.Scrollbar(log_frame, orient="horizontal", command=self.log_text.xview)
+        x_scroll = tk.Scrollbar(
+            log_frame, orient="horizontal", command=self.log_text.xview
+        )
         x_scroll.pack(fill="x", side="bottom")
         self.log_text.configure(xscrollcommand=x_scroll.set)
 
-    # ---------- логика загрузки/сохранения ----------
+    # ---------- загрузка/сохранение ----------
 
     def _load_data(self):
         profiles_data = load_json(self.profiles_path, [])
@@ -746,7 +653,9 @@ class VlfGui(tk.Tk):
             self.lbl_profile_name.config(text="Имя: -")
             return
         self.lbl_profile_type.config(text=f"Тип: {self.current_profile.type or '-'}")
-        self.lbl_profile_addr.config(text=f"Адрес: {self.current_profile.address or '-'}")
+        self.lbl_profile_addr.config(
+            text=f"Адрес: {self.current_profile.address or '-'}"
+        )
         self.lbl_profile_name.config(text=f"Имя: {self.current_profile.remark or '-'}")
 
     def _update_status_view(self):
@@ -795,14 +704,7 @@ class VlfGui(tk.Tk):
         if not self.current_profile:
             messagebox.showwarning(APP_TITLE, "Сначала выберите профиль.")
             return
-        if (
-            messagebox.askyesno(
-                APP_TITLE,
-                "Удалить выбранный профиль?",
-                icon="question",
-            )
-            is False
-        ):
+        if not messagebox.askyesno(APP_TITLE, "Удалить выбранный профиль?"):
             return
         self.profiles = [p for p in self.profiles if p is not self.current_profile]
         self.current_profile = self.profiles[0] if self.profiles else None
@@ -1021,7 +923,10 @@ class VlfGui(tk.Tk):
                 return
             path = filedialog.askopenfilename(
                 title="Выберите картинку с QR",
-                filetypes=[("Images", "*.png;*.jpg;*.jpeg;*.bmp;*.gif"), ("All", "*.*")],
+                filetypes=[
+                    ("Images", "*.png;*.jpg;*.jpeg;*.bmp;*.gif"),
+                    ("All", "*.*"),
+                ],
             )
             if not path:
                 return
@@ -1037,17 +942,17 @@ class VlfGui(tk.Tk):
             except Exception as e:
                 dark_showerror(APP_TITLE, f"Ошибка чтения QR: {e}")
 
-        btn_qr = ttk.Button(btn_frame, text="Из QR", command=on_from_qr)
-        btn_qr.pack(side="left")
-
-        ttk.Button(btn_frame, text="Отмена", command=on_cancel).pack(side="right", padx=4)
+        ttk.Button(btn_frame, text="Из QR", command=on_from_qr).pack(side="left")
+        ttk.Button(btn_frame, text="Отмена", command=on_cancel).pack(
+            side="right", padx=4
+        )
         ttk.Button(btn_frame, text="OK", command=on_ok).pack(side="right")
 
         dialog.grab_set()
         name_entry.focus_set()
         self.wait_window(dialog)
 
-    # ---------- генерация конфига sing-box ----------
+    # ---------- парсинг подписки / конфиг ----------
 
     def _parse_sub_link(self, sub_url: str):
         try:
@@ -1107,9 +1012,6 @@ class VlfGui(tk.Tk):
         flow = q.get("flow", [""])[0]
         security = q.get("security", ["none"])[0]
         sni = q.get("sni", [""])[0]
-        fp = q.get("fp", [""])[0]
-        alpn = q.get("alpn", [""])[0]
-        mode = q.get("mode", [""])[0]
         network = q.get("type", ["tcp"])[0]
 
         return {
@@ -1121,132 +1023,115 @@ class VlfGui(tk.Tk):
             "flow": flow,
             "security": security,
             "sni": sni,
-            "fp": fp,
-            "alpn": alpn,
-            "mode": mode,
             "network": network,
         }
 
-def _build_singbox_config(self, vless, exclusions: Exclusions):
-    server_addr = vless["host"]
-    server_port = vless["port"]
-    user_id = vless["id"]
-    security = vless["security"]
-    sni = vless["sni"]
-    flow = vless["flow"]
-    network = (vless["network"] or "tcp").lower()
+    def _build_singbox_config(self, vless, exclusions: Exclusions):
+        server_addr = vless["host"]
+        server_port = vless["port"]
+        user_id = vless["id"]
+        security = vless["security"]
+        sni = vless["sni"]
+        flow = vless["flow"]
+        _network = (vless["network"] or "tcp").lower()
 
-    tun_addr = "172.19.0.2/30"
+        tun_addr = "172.19.0.2/30"
 
-    inbound_tun = {
-        "type": "tun",
-        "tag": "tun-in",
-        "inet4_address": [tun_addr],
-        "mtu": 9000,
-        "auto_route": True,
-        "strict_route": True,
-        "stack": "gvisor",
-        "sniff": True,
-        "sniff_override_destination": True,
-    }
+        inbound_tun = {
+            "type": "tun",
+            "tag": "tun-in",
+            "inet4_address": [tun_addr],
+            "mtu": 9000,
+            "auto_route": True,
+            "strict_route": True,
+            "stack": "gvisor",
+            "sniff": True,
+            "sniff_override_destination": True,
+        }
 
-    # DNS — пока старый формат (даёт только WARN, но работает)
-    dns = {
-        "servers": [
-            {
-                "tag": "local",
-                "address": "udp://8.8.8.8",
-                "detour": "proxy-out",
-            }
-        ],
-        "strategy": "ipv4_only",
-        "disable_cache": False,
-    }
-
-    # 🚫 НЕТ поля "transport"
-    # 🚫 НЕТ fingerprint
-    # ✔ "tls.enabled" = true только при security=reality
-    outbound_proxy = {
-        "type": "vless",
-        "tag": "proxy-out",
-        "server": server_addr,
-        "server_port": server_port,
-        "uuid": user_id,
-        "flow": flow or "",
-        "packet_encoding": "xudp",
-
-        "tls": {
-            "enabled": security == "reality",
-            "server_name": sni or server_addr,
-            "reality": {
-                "enabled": security == "reality",
-                "public_key": "",
-                "short_id": "",
-            },
-        },
-    }
-
-    outbound_direct = {"type": "direct", "tag": "direct"}
-    outbound_dns = {"type": "dns", "tag": "dns-out"}
-    outbound_block = {"type": "block", "tag": "block"}
-
-    rules = [
-        {"protocol": "dns", "outbound": "dns-out"},
-        {"rule_set": ["geoip-ru"], "outbound": "direct"},
-    ]
-
-    # Сайты
-    for site in exclusions.sites:
-        site = site.strip()
-        if site:
-            rules.append({"domain": [site], "outbound": "direct"})
-
-    # Программы
-    for app in exclusions.apps:
-        exe = os.path.basename(app)
-        rules.append({"process_name": exe, "outbound": "direct"})
-
-    # geosite RU
-    if exclusions.ru_mode:
-        rules.append({"rule_set": ["geosite-ru"], "outbound": "direct"})
-
-    # Сервер — в обход туннеля
-    try:
-        socket.inet_aton(server_addr)
-        rules.append({"ip_cidr": [f"{server_addr}/32"], "outbound": "direct"})
-    except OSError:
-        rules.append({"domain": [server_addr], "outbound": "direct"})
-
-    config = {
-        "log": {"level": "info"},
-        "dns": dns,
-        "inbounds": [inbound_tun],
-        "outbounds": [
-            outbound_proxy,
-            outbound_direct,
-            outbound_dns,
-            outbound_block,
-        ],
-        "route": {
-            "rules": rules,
-            "rule_set": [
+        # legacy DNS формат – даёт только WARN в 1.12.12, но не FATAL
+        dns = {
+            "servers": [
                 {
-                    "tag": "geoip-ru",
-                    "type": "geoip",
-                    "country_code": ["RU"],
-                },
-                {
-                    "tag": "geosite-ru",
-                    "type": "geosite",
-                    "domain": ["geosite:category-ru"],
-                },
+                    "tag": "local",
+                    "address": "udp://8.8.8.8",
+                    "detour": "proxy-out",
+                }
             ],
-        },
-    }
+            "strategy": "ipv4_only",
+            "disable_cache": False,
+        }
 
-    return config
+        outbound_proxy = {
+            "type": "vless",
+            "tag": "proxy-out",
+            "server": server_addr,
+            "server_port": server_port,
+            "uuid": user_id,
+            "flow": flow or "",
+            "packet_encoding": "xudp",
+            "tls": {
+                "enabled": security == "reality",
+                "server_name": sni or server_addr,
+                "reality": {
+                    "enabled": security == "reality",
+                    "public_key": "",
+                    "short_id": "",
+                },
+            },
+        }
 
+        outbound_direct = {"type": "direct", "tag": "direct"}
+        outbound_dns = {"type": "dns", "tag": "dns-out"}
+        outbound_block = {"type": "block", "tag": "block"}
 
+        rules = [
+            {"protocol": "dns", "outbound": "dns-out"},
+        ]
+
+        rules.append({"rule_set": ["geoip-ru"], "outbound": "direct"})
+
+        for site in exclusions.sites:
+            host = site.strip()
+            if not host:
+                continue
+            rules.append({"domain": [host], "outbound": "direct"})
+
+        for app in exclusions.apps:
+            exe_name = os.path.basename(app)
+            rules.append({"process_name": exe_name, "outbound": "direct"})
+
+        if exclusions.ru_mode:
+            rules.append({"rule_set": ["geosite-ru"], "outbound": "direct"})
+
+        try:
+            socket.inet_aton(server_addr)
+            rules.append({"ip_cidr": [f"{server_addr}/32"], "outbound": "direct"})
+        except OSError:
+            rules.append({"domain": [server_addr], "outbound": "direct"})
+
+        config = {
+            "log": {"level": "info"},
+            "dns": dns,
+            "inbounds": [inbound_tun],
+            "outbounds": [outbound_proxy, outbound_direct, outbound_dns, outbound_block],
+            "route": {
+                "rules": rules,
+                "rule_set": [
+                    {
+                        "tag": "geoip-ru",
+                        "type": "geoip",
+                        "country_code": ["RU"],
+                    },
+                    {
+                        "tag": "geosite-ru",
+                        "type": "geosite",
+                        "domain": ["geosite:category-ru"],
+                    },
+                ],
+            },
+        }
+        return config
 
     # ---------- запуск / остановка sing-box ----------
 
@@ -1257,10 +1142,7 @@ def _build_singbox_config(self, vless, exclusions: Exclusions):
             messagebox.showwarning(APP_TITLE, "Сначала создайте и выберите профиль.")
             return
         if not self.sing_box_path.exists():
-            messagebox.showerror(
-                APP_TITLE,
-                f"Не найден {SING_BOX_EXE} рядом с программой.",
-            )
+            messagebox.showerror(APP_TITLE, f"Не найден {SING_BOX_EXE} рядом с программой.")
             return
 
         try:
@@ -1269,14 +1151,12 @@ def _build_singbox_config(self, vless, exclusions: Exclusions):
             messagebox.showerror(APP_TITLE, str(e))
             return
 
-        # Обновляем инфу по профилю
         self.current_profile.type = "VLESS"
         self.current_profile.address = f'{vless["host"]}:{vless["port"]}'
         self.current_profile.remark = vless["remark"]
         self._save_profiles()
         self._update_profile_info()
 
-        # Строим конфиг для sing-box (у тебя уже новая версия _build_singbox_config)
         config = self._build_singbox_config(vless, self.exclusions)
         try:
             with open(self.config_path, "w", encoding="utf-8") as f:
@@ -1285,7 +1165,6 @@ def _build_singbox_config(self, vless, exclusions: Exclusions):
             messagebox.showerror(APP_TITLE, f"Не удалось записать config.json: {e}")
             return
 
-        # Чистим лог
         self.log_text.configure(state="normal")
         self.log_text.delete("1.0", "end")
         self.log_text.configure(state="disabled")
@@ -1299,7 +1178,6 @@ def _build_singbox_config(self, vless, exclusions: Exclusions):
         def on_exit():
             self.after(0, self._on_singbox_exit)
 
-        # Запуск sing-box в отдельном потоке
         self.runner = SingBoxRunner(
             str(self.sing_box_path),
             str(self.config_path),
@@ -1308,7 +1186,6 @@ def _build_singbox_config(self, vless, exclusions: Exclusions):
         )
         self.runner.start()
 
-        # Обновляем внешний IP асинхронно
         threading.Thread(target=self._update_public_ip, daemon=True).start()
 
     def _on_singbox_exit(self):
@@ -1319,7 +1196,9 @@ def _build_singbox_config(self, vless, exclusions: Exclusions):
 
     def _update_public_ip(self):
         try:
-            with urllib.request.urlopen("https://api.ipify.org?format=text", timeout=10) as r:
+            with urllib.request.urlopen(
+                "https://api.ipify.org?format=text", timeout=10
+            ) as r:
                 ip = r.read().decode().strip()
         except Exception:
             ip = "-"
@@ -1332,7 +1211,6 @@ def _build_singbox_config(self, vless, exclusions: Exclusions):
             self.sing_box_running = False
             self._update_status_view()
             self._set_ip("-")
-
 
 
 if __name__ == "__main__":
