@@ -1,5 +1,5 @@
 import tkinter as tk
-from tkinter import ttk, messagebox, filedialog
+from tkinter import ttk, filedialog
 import json
 import subprocess
 import threading
@@ -10,136 +10,208 @@ from pathlib import Path
 from urllib.parse import urlparse, parse_qs, unquote
 import base64
 import socket
+import webbrowser
+
+import dark_messagebox as messagebox  # тёмные messagebox'ы
 
 # Цвета (nekobox-style)
 COLOR_BG = "#101421"
 COLOR_PANEL = "#151a24"
-COLOR_PANEL_DARK = "#111827"
-COLOR_TEXT = "#ffffff"
-COLOR_SUBTEXT = "#9ca3af"
-COLOR_ACCENT = "#00d4ff"
-COLOR_BAD = "#e11d48"
-COLOR_GOOD = "#22c55e"
+COLOR_ACCENT = "#00C6FF"
+COLOR_TEXT = "#E5E7EB"
 
-GREEN_BTN = "#22c55e"
-RED_BTN = "#ef4444"
+GREEN_BTN = "#16a34a"
+RED_BTN = "#dc2626"
 GRAY_BTN = "#4b5563"
 
+try:
+    from PIL import Image, ImageTk
+    from pyzbar.pyzbar import decode as qr_decode
+    QR_AVAILABLE = True
+except Exception:
+    Image = None
+    ImageTk = None
+    qr_decode = None
+    QR_AVAILABLE = False
+
 APP_TITLE = "VLF VPN по подписке"
-PROFILES_FILE = "profiles.json"
-EXCLUSIONS_FILE = "exclusions.json"
-SING_BOX_EXE = "sing-box.exe"
-
-
-def load_json(path, default):
-    try:
-        with open(path, "r", encoding="utf-8") as f:
-            return json.load(f)
-    except Exception:
-        return default
-
-
-def save_json(path, data):
-    try:
-        with open(path, "w", encoding="utf-8") as f:
-            json.dump(data, f, ensure_ascii=False, indent=2)
-    except Exception:
-        pass
+CONFIG_FILE = "vlf_gui_config.json"
 
 
 class Profile:
-    def __init__(self, name, sub_url):
+    def __init__(self, name, url, ptype="VLESS", address="", remark=""):
         self.name = name
-        self.sub_url = sub_url
-        self.type = ""
-        self.address = ""
-        self.remark = ""
+        self.url = url
+        self.ptype = ptype      # Тип (VLESS)
+        self.address = address  # host:port
+        self.remark = remark    # имя/label из #fragment
+
+        # Для возможных будущих полей легко расширять
 
     def to_dict(self):
         return {
             "name": self.name,
-            "sub_url": self.sub_url,
-            "type": self.type,
+            "url": self.url,
+            "ptype": self.ptype,
             "address": self.address,
             "remark": self.remark,
         }
 
     @staticmethod
-    def from_dict(d):
-        p = Profile(d.get("name", ""), d.get("sub_url", ""))
-        p.type = d.get("type", "")
-        p.address = d.get("address", "")
-        p.remark = d.get("remark", "")
-        return p
+    def from_dict(data: dict):
+        return Profile(
+            data.get("name", "Без имени"),
+            data.get("url", ""),
+            data.get("ptype", "VLESS"),
+            data.get("address", ""),
+            data.get("remark", ""),
+        )
 
 
-class Exclusions:
-    def __init__(self):
-        self.sites = []
-        self.apps = []
-        self.ru_mode = True
+def decode_subscription_to_vless(sub_bytes: bytes) -> str:
+    """
+    Берём содержимое подписки и вытаскиваем первую vless:// ссылку.
+    Поддерживаем:
+      - текст с vless:// строкой;
+      - base64 от одной/нескольких ссылок.
+    """
+    text = sub_bytes.decode("utf-8", errors="ignore").strip()
+    if not text:
+        raise ValueError("Subscription is empty")
 
-    def to_dict(self):
-        return {
-            "sites": self.sites,
-            "apps": self.apps,
-            "ru_mode": self.ru_mode,
+    # 1) прямой vless в тексте
+    for line in text.splitlines():
+        s = line.strip()
+        if s.startswith("vless://"):
+            return s
+
+    # 2) base64
+    compact = "".join(text.split())
+    try:
+        decoded = base64.b64decode(compact)
+        decoded_text = decoded.decode("utf-8", errors="ignore")
+    except Exception as e:
+        raise ValueError("Cannot decode subscription as base64") from e
+
+    for line in decoded_text.splitlines():
+        s = line.strip()
+        if s.startswith("vless://"):
+            return s
+
+    raise ValueError("No vless:// URL in subscription")
+
+
+def build_singbox_config(vless_url: str, ru_mode: bool, site_excl, app_excl):
+    """На основе одной VLESS-ссылки собираем config.json для sing-box."""
+    u = urlparse(vless_url)
+    if u.scheme != "vless":
+        raise ValueError("Not a vless:// URL")
+
+    uuid = u.username or ""
+    server = u.hostname or ""
+    port = u.port or 443
+
+    q = parse_qs(u.query)
+
+    def qget(key, default=""):
+        vals = q.get(key)
+        return vals[0] if vals else default
+
+    flow = qget("flow", "")
+    security = qget("security", "")
+    fp = qget("fp", "") or "chrome"
+    pbk = qget("pbk", "")
+    sid = qget("sid", "")
+    sni = qget("sni", "") or server
+    network = qget("type", "tcp")
+
+    tls = {
+        "enabled": True,
+        "server_name": sni,
+        "utls": {"enabled": True, "fingerprint": fp},
+    }
+    if security == "reality":
+        tls["reality"] = {
+            "enabled": True,
+            "public_key": pbk,
+            "short_id": sid,
         }
 
-    @staticmethod
-    def from_dict(d):
-        ex = Exclusions()
-        ex.sites = d.get("sites", [])
-        ex.apps = d.get("apps", [])
-        ex.ru_mode = d.get("ru_mode", True)
-        return ex
+    outbound_proxy = {
+        "type": "vless",
+        "tag": "proxy-out",
+        "server": server,
+        "server_port": port,
+        "uuid": uuid,
+        "network": network,
+        "tls": tls,
+    }
+    if flow:
+        outbound_proxy["flow"] = flow
 
+    outbound_direct = {"type": "direct", "tag": "direct"}
+    outbound_dns = {"type": "dns", "tag": "dns-out"}
+    outbound_block = {"type": "block", "tag": "block"}
 
-class SingBoxRunner(threading.Thread):
-    def __init__(self, exe_path, config_path, log_callback, on_exit):
-        super().__init__(daemon=True)
-        self.exe_path = exe_path
-        self.config_path = config_path
-        self.log_callback = log_callback
-        self.on_exit = on_exit
-        self.proc = None
-        self._stop_flag = threading.Event()
+    rules = [
+        {"protocol": "dns", "outbound": "dns-out"},
+    ]
 
-    def stop(self):
-        self._stop_flag.set()
-        if self.proc and self.proc.poll() is None:
-            try:
-                self.proc.terminate()
-            except Exception:
-                pass
+    # всегда не заворачиваем сам сервер через себя же
+    try:
+        server_ip = socket.gethostbyname(server)
+        rules.append({"ip_cidr": [f"{server_ip}/32"], "outbound": "direct"})
+    except Exception:
+        pass
 
-    def run(self):
-        try:
-            env = os.environ.copy()
-            # На всякий случай разрешаем legacy special outbounds, если они вдруг появятся
-            env["ENABLE_DEPRECATED_SPECIAL_OUTBOUNDS"] = "true"
+    if ru_mode:
+        rules.append(
+            {"domain_suffix": ["ru", "su", "рф"], "outbound": "direct"}
+        )
 
-            self.proc = subprocess.Popen(
-                [self.exe_path, "run", "-c", self.config_path],
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
-                bufsize=1,
-                universal_newlines=True,
-                env=env,
-            )
-        except Exception as e:
-            self.log_callback(f"[ERROR] Не удалось запустить sing-box: {e}\n")
-            self.on_exit()
-            return
+    if site_excl:
+        rules.append({"domain": site_excl, "outbound": "direct"})
 
-        for line in self.proc.stdout:
-            if self._stop_flag.is_set():
-                break
-            self.log_callback(line)
+    for name in app_excl:
+        rules.append({"process_name": name, "outbound": "direct"})
 
-        rc = self.proc.wait()
-        self.on_exit()
-        self.log_callback(f"\n[INFO] sing-box завершился с кодом {rc}\n")
+    route = {"auto_detect_interface": True, "rules": rules, "final": "proxy-out"}
+
+    dns = {
+        "servers": [
+            {
+                "tag": "dns-direct",
+                "address": "1.1.1.1",
+                "address_strategy": "prefer_ipv4",
+                "detour": "direct",
+            }
+        ]
+    }
+
+    inbound_tun = {
+        "type": "tun",
+        "tag": "tun-in",
+        "interface_name": "vlf_tun",
+        "mtu": 1500,
+        "inet4_address": "172.19.0.1/28",
+        "auto_route": True,
+        "strict_route": True,
+        "sniff": True,
+    }
+
+    config = {
+        "log": {"level": "info", "timestamp": True},
+        "dns": dns,
+        "inbounds": [inbound_tun],
+        "outbounds": [
+            outbound_proxy,
+            outbound_direct,
+            outbound_dns,
+            outbound_block,
+        ],
+        "route": route,
+    }
+    return config
 
 
 class VlfGui(tk.Tk):
@@ -159,80 +231,86 @@ class VlfGui(tk.Tk):
         self.geometry("820x620")
         self.resizable(False, False)
 
-        self.profiles_path = self.base_dir / PROFILES_FILE
-        self.exclusions_path = self.base_dir / EXCLUSIONS_FILE
-        self.config_path = self.base_dir / "config.json"
-        self.sing_box_path = self.base_dir / SING_BOX_EXE
+        self.config_data = {
+            "profiles": [],
+            "ru_mode": True,
+            "site_exclusions": [],
+            "app_exclusions": [],
+        }
+        self.current_profile_index = None
 
-        self.profiles = []
-        self.exclusions = Exclusions()
-
-        self.current_profile = None
-        self.runner = None
-        self.sing_box_running = False
-
-        self.profile_var = tk.StringVar()
-        self.status_var = tk.StringVar(value="отключен")
-        self.ip_var = tk.StringVar(value="IP: -")
-
-        self.ru_mode_var = tk.BooleanVar(value=True)
+        self.proc: subprocess.Popen | None = None
+        self.log_thread: threading.Thread | None = None
+        self.stop_log = threading.Event()
 
         self.logo_img_small = None
+        self.logo_label = None
+
+        # Переменные для инфо по профилю
+        self.profile_type_var = tk.StringVar(value="")
+        self.profile_addr_var = tk.StringVar(value="")
+        self.profile_name_var = tk.StringVar(value="")
 
         self._build_ui()
-        self._load_data()
-        self._refresh_profile_ui()
-        self._refresh_exclusions_ui()
-        self._update_status_view()
+        self._load_config()
+        self._refresh_profiles_ui()
 
-    # ---------- helpers ----------
+        self.protocol("WM_DELETE_WINDOW", self.on_close)
+
+    # ---------- конфиг GUI ----------
+
+    def _load_config(self):
+        path = Path(CONFIG_FILE)
+        if not path.exists():
+            return
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+            self.config_data.update(data)
+        except Exception:
+            pass
+
+    def _save_config(self):
+        try:
+            Path(CONFIG_FILE).write_text(
+                json.dumps(self.config_data, ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
+        except Exception:
+            pass
+
+    # ---------- UI helpers ----------
 
     def _load_logo_image_small(self):
-        try:
-            from PIL import Image, ImageTk
-
-            img_path = self.base_dir / "vlf_logo_small.png"
-            if not img_path.exists():
-                img_path = self.base_dir / "vlf_logo_big.png"
-                if not img_path.exists():
+        if not (Image and ImageTk):
+            return
+        for name in ["vlf_button_off.png", "vlf_logo.png", "vlf_256.png"]:
+            p = self.base_dir / name
+            if p.exists():
+                try:
+                    img = Image.open(p)
+                    img = img.resize((56, 56), Image.LANCZOS)
+                    self.logo_img_small = ImageTk.PhotoImage(img)
                     return
-            img = Image.open(img_path)
-            img = img.resize((24, 24), Image.LANCZOS)
-            self.logo_img_small = ImageTk.PhotoImage(img)
-        except Exception:
-            self.logo_img_small = None
+                except Exception:
+                    continue
 
-    def _append_log(self, text: str):
-        self.log_text.configure(state="normal")
-        self.log_text.insert("end", text)
-        self.log_text.see("end")
-        self.log_text.configure(state="disabled")
-
-    def _set_status(self, text: str, good: bool | None = None):
-        # статус оставляем логическим, но не выводим "отключен"/"подключен" в GUI
-        self.status_var.set(text)
-
-    def _set_ip(self, ip: str):
-        self.ip_var.set(f"IP: {ip}")
-
-    # ---------- фабрики виджетов ----------
-
-    def _create_pill_button(self, parent, text, bg, command=None):
+    def _create_pill_button(self, parent, text, bg, command=None, state="normal"):
         btn = tk.Button(
             parent,
             text=text,
             command=command,
             bg=bg,
-            fg="white",
+            fg=COLOR_TEXT,
             activebackground=bg,
-            activeforeground="white",
-            relief="flat",
-            bd=0,
-            padx=14,
+            activeforeground=COLOR_TEXT,
+            borderwidth=0,
+            highlightthickness=0,
+            padx=20,
             pady=6,
             font=("Segoe UI", 10, "bold"),
+            relief="flat",
         )
-        btn.configure(highlightthickness=0)
+        btn.configure(state=state)
         return btn
 
     def _create_icon_button(self, parent, text, command=None):
@@ -240,20 +318,20 @@ class VlfGui(tk.Tk):
             parent,
             text=text,
             command=command,
-            bg="#1b2430",
+            bg=COLOR_PANEL,
             fg=COLOR_TEXT,
-            activebackground="#243447",
+            activebackground="#1f2933",
             activeforeground=COLOR_TEXT,
-            relief="solid",
-            bd=1,
-            width=8,
+            relief="flat",
+            bd=0,
+            width=3,
             height=1,
             highlightthickness=0,
-            font=("Segoe UI", 9),
+            font=("Segoe UI", 9, "bold"),
         )
         return btn
 
-    # ---------- UI ----------
+    # ---------- построение UI ----------
 
     def _build_ui(self):
         self.configure(bg=COLOR_BG)
@@ -264,32 +342,65 @@ class VlfGui(tk.Tk):
             pass
 
         style.configure("TFrame", background=COLOR_BG)
-        style.configure("Panel.TFrame", background=COLOR_PANEL)
-        style.configure("TLabel", background=COLOR_BG, foreground=COLOR_TEXT)
+        style.configure("Header.TFrame", background=COLOR_BG)
         style.configure(
-            "Small.TCheckbutton",
+            "Panel.TLabelframe",
             background=COLOR_PANEL,
             foreground=COLOR_TEXT,
-            font=("Segoe UI", 9),
+            borderwidth=0,
         )
-        style.configure("Accent.TButton", font=("Segoe UI", 9, "bold"), padding=6)
+        style.configure(
+            "Panel.TLabelframe.Label",
+            background=COLOR_PANEL,
+            foreground=COLOR_TEXT,
+        )
+        style.configure("TLabel", background=COLOR_BG, foreground=COLOR_TEXT)
+        style.configure("Status.TLabel", background=COLOR_BG, foreground=COLOR_TEXT)
+        style.configure(
+            "Accent.TButton",
+            background=COLOR_PANEL,
+            foreground=COLOR_TEXT,
+            padding=4,
+        )
+        style.map(
+            "Accent.TButton",
+            background=[("active", "#1f2933")],
+            foreground=[("disabled", "#6b7280")],
+        )
 
-        # ВЕРХНЯЯ ПОЛОСА
-        header = tk.Frame(self, bg=COLOR_BG)
-        header.pack(fill="x", padx=10, pady=(8, 4))
+        main = ttk.Frame(self, padding=10, style="TFrame")
+        main.pack(fill="both", expand=True)
+
+        # ---- ШАПКА ----
+        header = ttk.Frame(main, style="Header.TFrame")
+        header.pack(fill="x")
 
         left_header = tk.Frame(header, bg=COLOR_BG)
         left_header.pack(side="left", padx=0, pady=4)
 
-        self.btn_tun_on = self._create_pill_button(
-            left_header, "Туннель ВКЛ", GREEN_BTN, command=self.on_tun_on
+        # скрытая кнопка-тоггл (оставляем для логики)
+        self.toggle_var = tk.StringVar(value="Подключить")
+        self.toggle_btn = ttk.Button(
+            left_header,
+            textvariable=self.toggle_var,
+            command=self.on_toggle,
+            style="Accent.TButton",
         )
-        self.btn_tun_on.pack(side="left")
+
+        # большие кнопки
+        self.btn_tun_on = self._create_pill_button(
+            left_header, "Туннель ВКЛ", GREEN_BTN, command=self.connect
+        )
+        self.btn_tun_on.pack(side="left", padx=(0, 8))
 
         self.btn_tun_off = self._create_pill_button(
-            left_header, "ВЫКЛ", RED_BTN, command=self.on_tun_off
+            left_header,
+            "ВЫКЛ",
+            RED_BTN,
+            command=self.disconnect,
+            state="disabled",
         )
-        self.btn_tun_off.pack(side="left", padx=4)
+        self.btn_tun_off.pack(side="left", padx=(0, 8))
 
         def proxy_msg():
             messagebox.showinfo(
@@ -299,163 +410,158 @@ class VlfGui(tk.Tk):
             )
 
         self.btn_proxy = self._create_pill_button(
-            left_header, "Без TUN (прокси)", GRAY_BTN, command=proxy_msg
+            left_header,
+            "Без TUN (прокси)",
+            GRAY_BTN,
+            command=proxy_msg,
         )
         self.btn_proxy.pack(side="left")
 
+        # Правая часть шапки – колонка с логотипом и @ботом
         right_header = tk.Frame(header, bg=COLOR_BG)
         right_header.pack(side="right", padx=0, pady=4)
 
         self._load_logo_image_small()
         if self.logo_img_small is not None:
-            tk.Label(right_header, image=self.logo_img_small, bg=COLOR_BG, bd=0).pack(
-                side="top", anchor="e"
+            self.logo_label = tk.Label(
+                right_header,
+                image=self.logo_img_small,
+                bg=COLOR_BG,
+                bd=0,
             )
         else:
-            tk.Label(
+            self.logo_label = tk.Label(
                 right_header,
                 text="VLF",
                 bg=COLOR_BG,
                 fg=COLOR_ACCENT,
-                font=("Segoe UI", 14, "bold"),
-            ).pack(side="top", anchor="e")
+                font=("Segoe UI", 18, "bold"),
+            )
+        self.logo_label.pack(anchor="center", pady=(0, 2))
 
-        bot_label = tk.Label(
+        self.bot_label = tk.Label(
             right_header,
             text="@vlftunAT_bot",
             bg=COLOR_BG,
-            fg=COLOR_ACCENT,
-            cursor="hand2",
-            font=("Segoe UI", 10),
-        )
-        bot_label.pack(side="top", anchor="e", pady=(4, 0))
-        bot_label.bind("<Button-1>", lambda e: self._open_telegram_bot())
-
-        # IP по центру
-        center_frame = tk.Frame(self, bg=COLOR_BG)
-        center_frame.pack(fill="x", padx=10, pady=(0, 4))
-
-        self.ip_label = tk.Label(
-            center_frame,
-            textvariable=self.ip_var,
-            bg=COLOR_BG,
-            fg=COLOR_SUBTEXT,
-            font=("Segoe UI", 9),
-        )
-        self.ip_label.pack(pady=(2, 0))
-
-        # ОСНОВНОЙ НИЗ
-        main_frame = tk.Frame(self, bg=COLOR_BG)
-        main_frame.pack(fill="both", expand=True, padx=10, pady=(4, 8))
-
-        # Левая панель – профили
-        left_panel = tk.Frame(main_frame, bg=COLOR_PANEL, bd=1, relief="solid")
-        left_panel.pack(side="left", fill="both", expand=True)
-
-        left_header_frame = tk.Frame(left_panel, bg=COLOR_PANEL)
-        left_header_frame.pack(fill="x", padx=8, pady=(6, 2))
-
-        tk.Label(
-            left_header_frame,
-            text="Профили",
-            bg=COLOR_PANEL,
             fg=COLOR_TEXT,
-            font=("Segoe UI", 9, "bold"),
-        ).pack(side="left")
+            font=("Segoe UI", 10),
+            cursor="hand2",
+        )
+        self.bot_label.pack(anchor="center", pady=(2, 0))
 
-        profile_controls = tk.Frame(left_header_frame, bg=COLOR_PANEL)
-        profile_controls.pack(side="right")
+        # кликабельный телеграм
+        self.bot_label.bind(
+            "<Button-1>",
+            lambda e: webbrowser.open_new("https://t.me/vlftunAT_bot"),
+        )
+
+        # ---- Статус ----
+        status_frame = ttk.Frame(main, style="TFrame")
+        status_frame.pack(fill="x", pady=(0, 4))
+
+        self.status_var = tk.StringVar(value="отключен")
+        self.status_lbl = ttk.Label(
+            status_frame,
+            textvariable=self.status_var,
+            style="Status.TLabel",
+            anchor="center",
+        )
+        self.status_lbl.pack()
+
+        # ---- Центр: профили + исключения ----
+        center = ttk.Frame(main, style="TFrame")
+        center.pack(fill="both", expand=True)
+
+        # ЛЕВЫЙ БЛОК: профили
+        left_panel = ttk.Labelframe(
+            center, text="Профили", style="Panel.TLabelframe"
+        )
+        left_panel.pack(
+            side="left", fill="both", expand=True, padx=(0, 6), pady=4
+        )
+
+        prof_top = ttk.Frame(left_panel, style="TFrame")
+        prof_top.pack(fill="x", padx=8, pady=(6, 4))
+
+        self.profile_var = tk.StringVar()
+        self.profile_combo = ttk.Combobox(
+            prof_top,
+            textvariable=self.profile_var,
+            state="readonly",
+        )
+        self.profile_combo.pack(side="left", fill="x", expand=True, padx=(0, 4))
+        self.profile_combo.bind("<<ComboboxSelected>>", self.on_profile_selected)
 
         ttk.Button(
-            profile_controls,
+            prof_top,
             text="Добавить",
             style="Accent.TButton",
             command=self.on_add_profile,
         ).pack(side="left", padx=2)
         ttk.Button(
-            profile_controls,
+            prof_top,
             text="Изменить",
             style="Accent.TButton",
             command=self.on_edit_profile,
         ).pack(side="left", padx=2)
         ttk.Button(
-            profile_controls,
+            prof_top,
             text="Удалить",
             style="Accent.TButton",
             command=self.on_delete_profile,
         ).pack(side="left", padx=2)
 
-        combo_frame = tk.Frame(left_panel, bg=COLOR_PANEL)
-        combo_frame.pack(fill="x", padx=8, pady=(0, 4))
-
-        self.profile_combo = ttk.Combobox(
-            combo_frame,
-            textvariable=self.profile_var,
-            state="readonly",
-            font=("Segoe UI", 9),
-        )
-        self.profile_combo.pack(fill="x")
-        self.profile_combo.bind("<<ComboboxSelected>>", self.on_profile_selected)
+        prof_list_wrap = tk.Frame(left_panel, bg=COLOR_PANEL)
+        prof_list_wrap.pack(fill="both", expand=True, padx=8, pady=(0, 4))
 
         self.profile_list = tk.Listbox(
-            left_panel,
-            height=6,
+            prof_list_wrap,
             bg=COLOR_PANEL,
             fg=COLOR_TEXT,
             selectbackground=COLOR_ACCENT,
             selectforeground="#000000",
-            borderwidth=0,
+            borderwidth=1,
+            relief="solid",
             highlightthickness=0,
-            activestyle="none",
+            exportselection=False,
         )
-        self.profile_list.pack(fill="both", expand=True, padx=8, pady=(0, 8))
-        self.profile_list.bind("<<ListboxSelect>>", self.on_profile_list_selected)
+        self.profile_list.pack(fill="both", expand=True, padx=1, pady=1)
+        self.profile_list.bind("<<ListboxSelect>>", self.on_profile_list_select)
 
-        info_frame = tk.Frame(left_panel, bg=COLOR_PANEL_DARK, height=48)
-        info_frame.pack(fill="x", padx=0, pady=(0, 0))
-        info_frame.pack_propagate(False)
+        # Информация о выбранном профиле (как в Nekobox)
+        info_frame = tk.Frame(left_panel, bg=COLOR_PANEL)
+        info_frame.pack(fill="x", padx=8, pady=(0, 8))
 
-        self.lbl_profile_type = tk.Label(
-            info_frame,
-            text="Тип: -",
-            bg=COLOR_PANEL_DARK,
-            fg=COLOR_SUBTEXT,
-            anchor="w",
+        def info_label(row, text, var):
+            tk.Label(
+                info_frame,
+                text=text,
+                bg=COLOR_PANEL,
+                fg="#9ca3af",
+                font=("Segoe UI", 9),
+            ).grid(row=row, column=0, sticky="w")
+            tk.Label(
+                info_frame,
+                textvariable=var,
+                bg=COLOR_PANEL,
+                fg=COLOR_TEXT,
+                font=("Segoe UI", 9, "bold"),
+            ).grid(row=row, column=1, sticky="w", padx=(4, 0))
+
+        info_label(0, "Тип:", self.profile_type_var)
+        info_label(1, "Адрес:", self.profile_addr_var)
+        info_label(2, "Имя:", self.profile_name_var)
+
+        # ПРАВЫЙ БЛОК: исключения
+        right_panel = ttk.Labelframe(
+            center, text="Исключения", style="Panel.TLabelframe"
         )
-        self.lbl_profile_type.pack(fill="x", padx=8, pady=(4, 0))
-
-        self.lbl_profile_addr = tk.Label(
-            info_frame,
-            text="Адрес: -",
-            bg=COLOR_PANEL_DARK,
-            fg=COLOR_SUBTEXT,
-            anchor="w",
+        right_panel.pack(
+            side="left", fill="both", expand=True, padx=(6, 0), pady=4
         )
-        self.lbl_profile_addr.pack(fill="x", padx=8)
 
-        self.lbl_profile_name = tk.Label(
-            info_frame,
-            text="Имя: -",
-            bg=COLOR_PANEL_DARK,
-            fg=COLOR_SUBTEXT,
-            anchor="w",
-        )
-        self.lbl_profile_name.pack(fill="x", padx=8, pady=(0, 4))
-
-        # Правая панель – исключения
-        right_panel = tk.Frame(main_frame, bg=COLOR_PANEL, bd=1, relief="solid")
-        right_panel.pack(side="left", fill="both", expand=True, padx=(8, 0))
-
-        exc_top = tk.Frame(right_panel, bg=COLOR_PANEL)
+        exc_top = ttk.Frame(right_panel, style="TFrame")
         exc_top.pack(fill="x", padx=8, pady=(6, 4))
-
-        tk.Label(
-            exc_top,
-            text="Исключения",
-            bg=COLOR_PANEL,
-            fg=COLOR_TEXT,
-            font=("Segoe UI", 9, "bold"),
-        ).pack(side="left")
 
         ttk.Button(
             exc_top,
@@ -470,11 +576,8 @@ class VlfGui(tk.Tk):
             command=self.on_add_app,
         ).pack(side="left", padx=2)
 
-        self.btn_manager = ttk.Button(
-            exc_top,
-            text="Менеджер",
-            style="Accent.TButton",
-            command=self.on_manage_exclusions,
+        self.btn_manager = self._create_pill_button(
+            exc_top, "Менеджер", GRAY_BTN, command=self.on_manage_exclusions
         )
         self.btn_manager.pack(side="right", padx=2)
 
@@ -486,7 +589,10 @@ class VlfGui(tk.Tk):
         sites_left.pack(side="left", fill="both", expand=True)
 
         tk.Label(
-            sites_left, text="Сайты", bg=COLOR_PANEL, fg=COLOR_TEXT
+            sites_left,
+            text="Сайты",
+            bg=COLOR_PANEL,
+            fg=COLOR_TEXT,
         ).pack(anchor="w", pady=(0, 2))
 
         self.site_list = tk.Listbox(
@@ -505,16 +611,10 @@ class VlfGui(tk.Tk):
 
         site_btns = tk.Frame(sites_frame, bg=COLOR_PANEL)
         site_btns.pack(side="left", fill="y", padx=(4, 0))
-        site_btns.rowconfigure(0, weight=1)
-        site_btns.rowconfigure(3, weight=1)
-        self._create_icon_button(site_btns, "Изм.", self.on_edit_site).grid(
-            row=1, column=0, pady=2, sticky="n"
-        )
-        self._create_icon_button(site_btns, "Удал.", self.on_delete_site).grid(
-            row=2, column=0, pady=2, sticky="n"
-        )
+        self._create_icon_button(site_btns, "✎", self.on_edit_site).pack(pady=2)
+        self._create_icon_button(site_btns, "✖", self.on_delete_site).pack(pady=2)
 
-        # Программы
+        # Приложения
         apps_frame = tk.Frame(right_panel, bg=COLOR_PANEL)
         apps_frame.pack(fill="both", expand=True, padx=8, pady=(0, 4))
 
@@ -522,7 +622,10 @@ class VlfGui(tk.Tk):
         apps_left.pack(side="left", fill="both", expand=True)
 
         tk.Label(
-            apps_left, text="Программы", bg=COLOR_PANEL, fg=COLOR_TEXT
+            apps_left,
+            text="Программы",
+            bg=COLOR_PANEL,
+            fg=COLOR_TEXT,
         ).pack(anchor="w", pady=(0, 2))
 
         self.app_list = tk.Listbox(
@@ -539,315 +642,156 @@ class VlfGui(tk.Tk):
         )
         self.app_list.pack(fill="both", expand=True, padx=1, pady=1)
 
-        apps_btns = tk.Frame(apps_frame, bg=COLOR_PANEL)
-        apps_btns.pack(side="left", fill="y", padx=(4, 0))
-        apps_btns.rowconfigure(0, weight=1)
-        apps_btns.rowconfigure(3, weight=1)
-        self._create_icon_button(apps_btns, "Изм.", self.on_edit_app).grid(
-            row=1, column=0, pady=2, sticky="n"
-        )
-        self._create_icon_button(apps_btns, "Удал.", self.on_delete_app).grid(
-            row=2, column=0, pady=2, sticky="n"
-        )
+        app_btns = tk.Frame(apps_frame, bg=COLOR_PANEL)
+        app_btns.pack(side="left", fill="y", padx=(4, 0))
+        self._create_icon_button(app_btns, "✎", self.on_edit_app).pack(pady=2)
+        self._create_icon_button(app_btns, "✖", self.on_delete_app).pack(pady=2)
 
-        ru_frame = tk.Frame(right_panel, bg=COLOR_PANEL)
-        ru_frame.pack(fill="x", padx=8, pady=(0, 6))
+        # Режим РФ
+        rf_frame = tk.Frame(right_panel, bg=COLOR_PANEL)
+        rf_frame.pack(fill="x", padx=8, pady=(4, 8))
 
-        self.chk_ru_mode = ttk.Checkbutton(
-            ru_frame,
+        self.ru_mode_var = tk.BooleanVar(value=True)
+        self.ru_toggle = tk.Checkbutton(
+            rf_frame,
             text="Режим РФ: русские сайты напрямую",
             variable=self.ru_mode_var,
-            style="Small.TCheckbutton",
             command=self.on_ru_mode_changed,
-        )
-        self.chk_ru_mode.pack(anchor="w")
-
-        # ЛОГ
-        log_frame = tk.Frame(self, bg=COLOR_BG, bd=1, relief="solid")
-        log_frame.pack(fill="both", expand=True, padx=10, pady=(0, 10))
-
-        tk.Label(
-            log_frame,
-            text="Лог sing-box",
-            bg=COLOR_BG,
+            bg=COLOR_PANEL,
             fg=COLOR_TEXT,
-            font=("Segoe UI", 9, "bold"),
-        ).pack(anchor="w", padx=6, pady=(4, 0))
+            activebackground=COLOR_PANEL,
+            activeforeground=COLOR_TEXT,
+            selectcolor=COLOR_PANEL,
+            highlightthickness=0,
+            bd=0,
+            anchor="w",
+        )
+        self.ru_toggle.pack(anchor="w")
+
+        # ---- ЛОГ ----
+        log_frame = ttk.Labelframe(
+            main, text="Лог sing-box", style="Panel.TLabelframe"
+        )
+        log_frame.pack(fill="both", expand=True, pady=(6, 0))
 
         self.log_text = tk.Text(
             log_frame,
-            bg=COLOR_BG,
-            fg=COLOR_TEXT,
-            insertbackground=COLOR_TEXT,
             wrap="none",
-            height=8,
-            borderwidth=0,
-            highlightthickness=0,
-            font=("Consolas", 8),
-            state="disabled",
-        )
-        self.log_text.pack(fill="both", expand=True, padx=4, pady=(0, 4))
-
-        x_scroll = tk.Scrollbar(
-            log_frame, orient="horizontal", command=self.log_text.xview
-        )
-        x_scroll.pack(fill="x", side="bottom")
-        self.log_text.configure(xscrollcommand=x_scroll.set)
-
-    # ---------- загрузка/сохранение ----------
-
-    def _load_data(self):
-        profiles_data = load_json(self.profiles_path, [])
-        self.profiles = [Profile.from_dict(d) for d in profiles_data]
-
-        excl_data = load_json(self.exclusions_path, self.exclusions.to_dict())
-        self.exclusions = Exclusions.from_dict(excl_data)
-        self.ru_mode_var.set(self.exclusions.ru_mode)
-
-        if self.profiles:
-            self.current_profile = self.profiles[0]
-            self.profile_var.set(self.current_profile.name)
-            self.profile_list.selection_set(0)
-
-    def _save_profiles(self):
-        data = [p.to_dict() for p in self.profiles]
-        save_json(self.profiles_path, data)
-
-    def _save_exclusions(self):
-        self.exclusions.ru_mode = self.ru_mode_var.get()
-        save_json(self.exclusions_path, self.exclusions.to_dict())
-
-    def _refresh_profile_ui(self):
-        names = [p.name for p in self.profiles]
-        self.profile_combo["values"] = names
-        self.profile_list.delete(0, "end")
-        for name in names:
-            self.profile_list.insert("end", name)
-        if self.current_profile and self.current_profile.name in names:
-            idx = names.index(self.current_profile.name)
-            self.profile_combo.current(idx)
-            self.profile_list.selection_clear(0, "end")
-            self.profile_list.selection_set(idx)
-        elif names:
-            self.profile_combo.current(0)
-            self.profile_list.selection_clear(0, "end")
-            self.profile_list.selection_set(0)
-            self.current_profile = self.profiles[0]
-        else:
-            self.profile_combo.set("")
-            self.current_profile = None
-        self._update_profile_info()
-
-    def _refresh_exclusions_ui(self):
-        self.site_list.delete(0, "end")
-        for s in self.exclusions.sites:
-            self.site_list.insert("end", s)
-        self.app_list.delete(0, "end")
-        for a in self.exclusions.apps:
-            self.app_list.insert("end", a)
-
-    def _update_profile_info(self):
-        if not self.current_profile:
-            self.lbl_profile_type.config(text="Тип: -")
-            self.lbl_profile_addr.config(text="Адрес: -")
-            self.lbl_profile_name.config(text="Имя: -")
-            return
-        self.lbl_profile_type.config(text=f"Тип: {self.current_profile.type or '-'}")
-        self.lbl_profile_addr.config(
-            text=f"Адрес: {self.current_profile.address or '-'}"
-        )
-        self.lbl_profile_name.config(text=f"Имя: {self.current_profile.remark or '-'}")
-
-    def _update_status_view(self):
-        if self.sing_box_running:
-            self._set_status("подключен", good=True)
-        else:
-            self._set_status("отключен", good=False)
-
-    # ---------- действия UI ----------
-
-    def _open_telegram_bot(self):
-        import webbrowser
-
-        webbrowser.open("https://t.me/vlftunAT_bot")
-
-    def on_profile_selected(self, event=None):
-        name = self.profile_var.get()
-        for p in self.profiles:
-            if p.name == name:
-                self.current_profile = p
-                break
-        else:
-            self.current_profile = None
-        self._update_profile_info()
-
-    def on_profile_list_selected(self, event=None):
-        sel = self.profile_list.curselection()
-        if not sel:
-            return
-        idx = sel[0]
-        if 0 <= idx < len(self.profiles):
-            self.current_profile = self.profiles[idx]
-            self.profile_var.set(self.current_profile.name)
-            self._update_profile_info()
-
-    def on_add_profile(self):
-        self._edit_profile_dialog(None)
-
-    def on_edit_profile(self):
-        if not self.current_profile:
-            messagebox.showwarning(APP_TITLE, "Сначала выберите профиль.")
-            return
-        self._edit_profile_dialog(self.current_profile)
-
-    def on_delete_profile(self):
-        if not self.current_profile:
-            messagebox.showwarning(APP_TITLE, "Сначала выберите профиль.")
-            return
-        if not messagebox.askyesno(APP_TITLE, "Удалить выбранный профиль?"):
-            return
-        self.profiles = [p for p in self.profiles if p is not self.current_profile]
-        self.current_profile = self.profiles[0] if self.profiles else None
-        self._save_profiles()
-        self._refresh_profile_ui()
-
-    def on_add_site(self):
-        site = self._ask_string("Добавить сайт", "Введите домен или URL:")
-        if site:
-            self.exclusions.sites.append(site)
-            self._save_exclusions()
-            self._refresh_exclusions_ui()
-
-    def on_edit_site(self):
-        sel = self.site_list.curselection()
-        if not sel:
-            return
-        idx = sel[0]
-        cur = self.exclusions.sites[idx]
-        new_val = self._ask_string("Редактировать сайт", "Измените домен или URL:", cur)
-        if new_val:
-            self.exclusions.sites[idx] = new_val
-            self._save_exclusions()
-            self._refresh_exclusions_ui()
-
-    def on_delete_site(self):
-        sel = self.site_list.curselection()
-        if not sel:
-            return
-        idx = sel[0]
-        if not messagebox.askyesno(APP_TITLE, "Удалить выбранный сайт?"):
-            return
-        self.exclusions.sites.pop(idx)
-        self._save_exclusions()
-        self._refresh_exclusions_ui()
-
-    def on_add_app(self):
-        path = filedialog.askopenfilename(title="Выберите exe-файл программы")
-        if path:
-            self.exclusions.apps.append(path)
-            self._save_exclusions()
-            self._refresh_exclusions_ui()
-
-    def on_edit_app(self):
-        sel = self.app_list.curselection()
-        if not sel:
-            return
-        idx = sel[0]
-        cur = self.exclusions.apps[idx]
-        new_val = self._ask_string(
-            "Редактировать программу", "Измените путь к exe-файлу:", cur
-        )
-        if new_val:
-            self.exclusions.apps[idx] = new_val
-            self._save_exclusions()
-            self._refresh_exclusions_ui()
-
-    def on_delete_app(self):
-        sel = self.app_list.curselection()
-        if not sel:
-            return
-        idx = sel[0]
-        if not messagebox.askyesno(APP_TITLE, "Удалить выбранную программу?"):
-            return
-        self.exclusions.apps.pop(idx)
-        self._save_exclusions()
-        self._refresh_exclusions_ui()
-
-    def on_manage_exclusions(self):
-        messagebox.showinfo(
-            APP_TITLE,
-            "Список исключений показан в этом блоке.\n"
-            "Добавить: кнопки сверху.\n"
-            "Редактировать/удалить: выбери элемент и используй кнопки 'Изм.' / 'Удал.'",
-        )
-
-    def on_ru_mode_changed(self):
-        self._save_exclusions()
-
-    # ---------- диалоги ----------
-
-    def _ask_string(self, title, prompt, initial=""):
-        dialog = tk.Toplevel(self)
-        dialog.title(title)
-        dialog.configure(bg=COLOR_BG)
-        dialog.resizable(False, False)
-
-        dialog.update_idletasks()
-        x = self.winfo_x() + (self.winfo_width() // 2) - 150
-        y = self.winfo_y() + (self.winfo_height() // 2) - 60
-        dialog.geometry(f"300x120+{x}+{y}")
-
-        tk.Label(
-            dialog,
-            text=prompt,
-            bg=COLOR_BG,
-            fg=COLOR_TEXT,
-        ).pack(anchor="w", padx=8, pady=(8, 2))
-
-        var = tk.StringVar(value=initial)
-        entry = tk.Entry(
-            dialog,
-            textvariable=var,
-            bg=COLOR_PANEL,
+            bg="#0b0f1a",
             fg=COLOR_TEXT,
             insertbackground=COLOR_TEXT,
             relief="flat",
+            borderwidth=0,
         )
-        entry.pack(fill="x", padx=8, pady=(0, 8))
-        entry.focus_set()
+        self.log_text.pack(
+            side="left", fill="both", expand=True, padx=(6, 0), pady=6
+        )
 
-        btn_frame = tk.Frame(dialog, bg=COLOR_BG)
-        btn_frame.pack(fill="x", padx=8, pady=(0, 8))
+        log_scroll = ttk.Scrollbar(
+            log_frame, orient="vertical", command=self.log_text.yview
+        )
+        log_scroll.pack(side="right", fill="y", pady=6)
+        self.log_text.configure(yscrollcommand=log_scroll.set)
 
-        result = {"value": None}
+        self.set_status("отключен", "red")
 
-        def on_ok():
-            result["value"] = var.get().strip()
-            dialog.destroy()
+    # ---------- helpers ----------
 
-        def on_cancel():
-            dialog.destroy()
+    def append_log(self, text: str):
+        self.log_text.insert("end", text)
+        self.log_text.see("end")
 
-        ttk.Button(btn_frame, text="OK", command=on_ok).pack(side="right", padx=4)
-        ttk.Button(btn_frame, text="Отмена", command=on_cancel).pack(side="right")
+    def set_status(self, text: str, color: str):
+        self.status_var.set(text)
+        self.status_lbl.configure(foreground=color)
 
-        dialog.grab_set()
-        self.wait_window(dialog)
-        return result["value"]
+    # ---------- profiles ----------
 
-    def _edit_profile_dialog(self, profile: Profile | None):
-        from dark_messagebox import dark_showerror, dark_showinfo
+    def _get_profiles(self):
+        return [Profile.from_dict(p) for p in self.config_data.get("profiles", [])]
 
+    def _set_profiles(self, profiles):
+        self.config_data["profiles"] = [p.to_dict() for p in profiles]
+        self._save_config()
+        self._refresh_profiles_ui()
+
+    def _refresh_profile_info_ui(self):
+        profiles = self._get_profiles()
+        if (
+            self.current_profile_index is not None
+            and 0 <= self.current_profile_index < len(profiles)
+        ):
+            p = profiles[self.current_profile_index]
+            self.profile_type_var.set(p.ptype or "VLESS")
+            self.profile_addr_var.set(p.address or "")
+            self.profile_name_var.set(p.remark or "")
+        else:
+            self.profile_type_var.set("")
+            self.profile_addr_var.set("")
+            self.profile_name_var.set("")
+
+    def _refresh_profiles_ui(self):
+        profiles = self._get_profiles()
+        names = [p.name for p in profiles]
+
+        self.profile_combo["values"] = names
+
+        if profiles:
+            if (
+                self.current_profile_index is None
+                or self.current_profile_index >= len(profiles)
+            ):
+                self.current_profile_index = 0
+            self.profile_combo.current(self.current_profile_index)
+            self.profile_var.set(profiles[self.current_profile_index].name)
+        else:
+            self.current_profile_index = None
+            self.profile_combo.set("")
+            self.profile_var.set("")
+
+        self.profile_list.delete(0, "end")
+        for n in names:
+            self.profile_list.insert("end", n)
+        if self.current_profile_index is not None and profiles:
+            idx = self.current_profile_index
+            if idx < len(profiles):
+                self.profile_list.selection_clear(0, "end")
+                self.profile_list.selection_set(idx)
+                self.profile_list.see(idx)
+
+        self._refresh_exclusions_ui()
+        self._refresh_profile_info_ui()
+
+    def on_profile_selected(self, event=None):
+        idx = self.profile_combo.current()
+        self.current_profile_index = idx if idx >= 0 else None
+        if self.current_profile_index is not None:
+            self.profile_list.selection_clear(0, "end")
+            self.profile_list.selection_set(self.current_profile_index)
+            self.profile_list.see(self.current_profile_index)
+        self._refresh_profile_info_ui()
+
+    def on_profile_list_select(self, event=None):
+        if not self.profile_list.curselection():
+            return
+        idx = self.profile_list.curselection()[0]
+        profiles = self._get_profiles()
+        if idx >= len(profiles):
+            return
+        self.current_profile_index = idx
+        self.profile_combo.current(idx)
+        self.profile_var.set(profiles[idx].name)
+        self._refresh_profile_info_ui()
+
+    def _profile_dialog(self, title, profile: Profile | None = None):
         dialog = tk.Toplevel(self)
-        dialog.title("Новый профиль" if profile is None else "Изменить профиль")
-        dialog.configure(bg=COLOR_BG)
+        dialog.title(title)
+        dialog.transient(self)
+        dialog.grab_set()
         dialog.resizable(False, False)
+        dialog.configure(bg=COLOR_BG)
 
-        dialog.update_idletasks()
-        x = self.winfo_x() + (self.winfo_width() // 2) - 200
-        y = self.winfo_y() + (self.winfo_height() // 2) - 90
-        dialog.geometry(f"400x180+{x}+{y}")
-
+        # Имя
         tk.Label(
             dialog,
             text="Название профиля:",
@@ -866,6 +810,7 @@ class VlfGui(tk.Tk):
         )
         name_entry.pack(fill="x", padx=8, pady=(0, 8))
 
+        # URL
         tk.Label(
             dialog,
             text="Ссылка-подписка:",
@@ -873,356 +818,598 @@ class VlfGui(tk.Tk):
             fg=COLOR_TEXT,
         ).pack(anchor="w", padx=8, pady=(0, 2))
 
-        sub_var = tk.StringVar(value=profile.sub_url if profile else "")
-        sub_entry = tk.Entry(
+        url_var = tk.StringVar(value=profile.url if profile else "")
+        url_entry = tk.Entry(
             dialog,
-            textvariable=sub_var,
+            textvariable=url_var,
             bg=COLOR_PANEL,
             fg=COLOR_TEXT,
             insertbackground=COLOR_TEXT,
             relief="flat",
         )
-        sub_entry.pack(fill="x", padx=8, pady=(0, 8))
+        url_entry.pack(fill="x", padx=8, pady=(0, 8))
 
-        btn_frame = tk.Frame(dialog, bg=COLOR_BG)
-        btn_frame.pack(fill="x", padx=8, pady=(0, 8))
+        btn_row = tk.Frame(dialog, bg=COLOR_BG)
+        btn_row.pack(fill="x", padx=8, pady=(0, 8))
 
-        result = {"saved": False}
+        res = {"ok": False}
 
         def on_ok():
             name = name_var.get().strip()
-            sub = sub_var.get().strip()
-            if not name or not sub:
-                dark_showerror(APP_TITLE, "Нужно заполнить и имя, и ссылку.")
+            url = url_var.get().strip()
+            if not name:
+                messagebox.showerror(APP_TITLE, "Название профиля не может быть пустым.")
                 return
-            if profile is None:
-                p = Profile(name, sub)
-                self.profiles.append(p)
-                self.current_profile = p
-            else:
-                profile.name = name
-                profile.sub_url = sub
-                self.current_profile = profile
-            self._save_profiles()
-            self._refresh_profile_ui()
-            result["saved"] = True
+            if not url:
+                messagebox.showerror(APP_TITLE, "Нужна ссылка-подписка.")
+                return
+            res["ok"] = True
+            res["name"] = name
+            res["url"] = url
             dialog.destroy()
 
         def on_cancel():
             dialog.destroy()
 
-        def on_from_qr():
-            try:
-                from PIL import Image
-                from pyzbar.pyzbar import decode
-            except Exception:
-                dark_showerror(
-                    APP_TITLE,
-                    "Для чтения QR нужно установить pillow и pyzbar.",
+        # Кнопка QR только если библиотеки реально есть
+        if QR_AVAILABLE:
+            def load_qr():
+                path = filedialog.askopenfilename(
+                    title="Выбери картинку с QR-кодом",
+                    filetypes=[
+                        (
+                            "Images",
+                            "*.png;*.jpg;*.jpeg;*.bmp;*.gif;*.webp",
+                        ),
+                        ("All files", "*.*"),
+                    ],
+                )
+                if not path:
+                    return
+                try:
+                    img = Image.open(path)
+                    codes = qr_decode(img)
+                    if not codes:
+                        messagebox.showerror(
+                            APP_TITLE, "QR-код не найден на этой картинке."
+                        )
+                        return
+                    data = codes[0].data.decode("utf-8")
+                    url_var.set(data)
+                except Exception as e:
+                    messagebox.showerror(APP_TITLE, f"Ошибка чтения QR: {e}")
+
+            self._create_pill_button(btn_row, "Из QR", GRAY_BTN, load_qr).pack(
+                side="left", padx=(0, 8)
+            )
+
+        self._create_pill_button(btn_row, "Отмена", GRAY_BTN, on_cancel).pack(
+            side="right", padx=(4, 0)
+        )
+        self._create_pill_button(btn_row, "OK", GREEN_BTN, on_ok).pack(
+            side="right"
+        )
+
+        # Центруем диалог относительно окна
+        dialog.update_idletasks()
+        win_w = dialog.winfo_width()
+        win_h = dialog.winfo_height()
+        root_x = self.winfo_rootx()
+        root_y = self.winfo_rooty()
+        root_w = self.winfo_width()
+        root_h = self.winfo_height()
+        x = root_x + (root_w - win_w) // 2
+        y = root_y + (root_h - win_h) // 2
+        dialog.geometry(f"+{x}+{y}")
+
+        dialog.wait_window()
+        if res["ok"]:
+            return Profile(res["name"], res["url"])
+        return None
+
+    def on_add_profile(self):
+        p = self._profile_dialog("Новый профиль")
+        if not p:
+            return
+        profiles = self._get_profiles()
+        profiles.append(p)
+        self._set_profiles(profiles)
+        self.current_profile_index = len(profiles) - 1
+        self._refresh_profiles_ui()
+
+    def on_edit_profile(self):
+        profiles = self._get_profiles()
+        if (
+            self.current_profile_index is None
+            or self.current_profile_index >= len(profiles)
+        ):
+            messagebox.showerror(APP_TITLE, "Сначала выбери профиль.")
+            return
+        orig = profiles[self.current_profile_index]
+        p = self._profile_dialog("Редактирование профиля", orig)
+        if not p:
+            return
+        p.ptype = orig.ptype
+        p.address = orig.address
+        p.remark = orig.remark
+        profiles[self.current_profile_index] = p
+        self._set_profiles(profiles)
+
+    def on_delete_profile(self):
+        profiles = self._get_profiles()
+        if (
+            self.current_profile_index is None
+            or self.current_profile_index >= len(profiles)
+        ):
+            messagebox.showerror(APP_TITLE, "Сначала выбери профиль.")
+            return
+        if not messagebox.askyesno(APP_TITLE, "Удалить выбранный профиль?"):
+            return
+        del profiles[self.current_profile_index]
+        self.current_profile_index = 0 if profiles else None
+        self._set_profiles(profiles)
+
+    # ---------- exclusions ----------
+
+    def _refresh_exclusions_ui(self):
+        self.ru_mode_var.set(self.config_data.get("ru_mode", True))
+
+        self.site_list.delete(0, "end")
+        for d in self.config_data.get("site_exclusions", []):
+            self.site_list.insert("end", d)
+
+        self.app_list.delete(0, "end")
+        for p in self.config_data.get("app_exclusions", []):
+            self.app_list.insert("end", p)
+
+    def on_ru_mode_changed(self):
+        self.config_data["ru_mode"] = bool(self.ru_mode_var.get())
+        self._save_config()
+
+    def on_add_site(self):
+        self._edit_site_dialog()
+
+    def on_edit_site(self):
+        try:
+            idx = self.site_list.curselection()[0]
+        except IndexError:
+            messagebox.showerror(APP_TITLE, "Выбери сайт в списке.")
+            return
+        current = self.config_data.get("site_exclusions", [])[idx]
+        self._edit_site_dialog(idx, current)
+
+    def _edit_site_dialog(self, index=None, current=""):
+        dialog = tk.Toplevel(self)
+        dialog.title("Сайт-исключение")
+        dialog.transient(self)
+        dialog.grab_set()
+        dialog.configure(bg=COLOR_BG)
+
+        tk.Label(
+            dialog,
+            text="Домен (example.com, bank.ru и т.п.):",
+            bg=COLOR_BG,
+            fg=COLOR_TEXT,
+        ).pack(anchor="w", padx=8, pady=(8, 2))
+        var = tk.StringVar(value=current)
+        tk.Entry(
+            dialog,
+            textvariable=var,
+            bg=COLOR_PANEL,
+            fg=COLOR_TEXT,
+            insertbackground=COLOR_TEXT,
+            relief="flat",
+        ).pack(fill="x", padx=8, pady=(0, 8))
+
+        res = {"ok": False}
+
+        def on_ok():
+            v = var.get().strip()
+            if not v:
+                messagebox.showerror(APP_TITLE, "Домен не может быть пустым.")
+                return
+            res["ok"] = True
+            res["value"] = v
+            dialog.destroy()
+
+        def on_cancel():
+            dialog.destroy()
+
+        btns = tk.Frame(dialog, bg=COLOR_BG)
+        btns.pack(fill="x", padx=8, pady=(0, 8))
+        self._create_pill_button(btns, "OK", GREEN_BTN, on_ok).pack(
+            side="right", padx=(4, 0)
+        )
+        self._create_pill_button(btns, "Отмена", GRAY_BTN, on_cancel).pack(
+            side="right"
+        )
+
+        dialog.update_idletasks()
+        win_w = dialog.winfo_width()
+        win_h = dialog.winfo_height()
+        root_x = self.winfo_rootx()
+        root_y = self.winfo_rooty()
+        root_w = self.winfo_width()
+        root_h = self.winfo_height()
+        x = root_x + (root_w - win_w) // 2
+        y = root_y + (root_h - win_h) // 2
+        dialog.geometry(f"+{x}+{y}")
+
+        dialog.wait_window()
+        if not res["ok"]:
+            return
+
+        lst = self.config_data.get("site_exclusions", [])
+        if index is None:
+            lst.append(res["value"])
+        else:
+            lst[index] = res["value"]
+        self.config_data["site_exclusions"] = lst
+        self._save_config()
+        self._refresh_exclusions_ui()
+
+    def on_delete_site(self):
+        try:
+            idx = self.site_list.curselection()[0]
+        except IndexError:
+            messagebox.showerror(APP_TITLE, "Выбери сайт в списке.")
+            return
+        lst = self.config_data.get("site_exclusions", [])
+        if idx >= len(lst):
+            return
+        del lst[idx]
+        self.config_data["site_exclusions"] = lst
+        self._save_config()
+        self._refresh_exclusions_ui()
+
+    def on_add_app(self):
+        self._edit_app_dialog()
+
+    def on_edit_app(self):
+        try:
+            idx = self.app_list.curselection()[0]
+        except IndexError:
+            messagebox.showerror(APP_TITLE, "Выбери программу в списке.")
+            return
+        current = self.config_data.get("app_exclusions", [])[idx]
+        self._edit_app_dialog(idx, current)
+
+    def _edit_app_dialog(self, index=None, current=""):
+        dialog = tk.Toplevel(self)
+        dialog.title("Программа-исключение")
+        dialog.transient(self)
+        dialog.grab_set()
+        dialog.configure(bg=COLOR_BG)
+
+        tk.Label(
+            dialog,
+            text="Имя процесса (например, bankclient.exe):",
+            bg=COLOR_BG,
+            fg=COLOR_TEXT,
+        ).pack(anchor="w", padx=8, pady=(8, 2))
+        var = tk.StringVar(value=current)
+        tk.Entry(
+            dialog,
+            textvariable=var,
+            bg=COLOR_PANEL,
+            fg=COLOR_TEXT,
+            insertbackground=COLOR_TEXT,
+            relief="flat",
+        ).pack(fill="x", padx=8, pady=(0, 8))
+
+        res = {"ok": False}
+
+        def on_ok():
+            v = var.get().strip()
+            if not v:
+                messagebox.showerror(
+                    APP_TITLE, "Имя процесса не может быть пустым."
                 )
                 return
-            path = filedialog.askopenfilename(
-                title="Выберите картинку с QR",
-                filetypes=[
-                    ("Images", "*.png;*.jpg;*.jpeg;*.bmp;*.gif"),
-                    ("All", "*.*"),
-                ],
+            res["ok"] = True
+            res["value"] = v
+            dialog.destroy()
+
+        def on_cancel():
+            dialog.destroy()
+
+        btns = tk.Frame(dialog, bg=COLOR_BG)
+        btns.pack(fill="x", padx=8, pady=(0, 8))
+        self._create_pill_button(btns, "OK", GREEN_BTN, on_ok).pack(
+            side="right", padx=(4, 0)
+        )
+        self._create_pill_button(btns, "Отмена", GRAY_BTN, on_cancel).pack(
+            side="right"
+        )
+
+        dialog.update_idletasks()
+        win_w = dialog.winfo_width()
+        win_h = dialog.winfo_height()
+        root_x = self.winfo_rootx()
+        root_y = self.winfo_rooty()
+        root_w = self.winfo_width()
+        root_h = self.winfo_height()
+        x = root_x + (root_w - win_w) // 2
+        y = root_y + (root_h - win_h) // 2
+        dialog.geometry(f"+{x}+{y}")
+
+        dialog.wait_window()
+        if not res["ok"]:
+            return
+
+        lst = self.config_data.get("app_exclusions", [])
+        if index is None:
+            lst.append(res["value"])
+        else:
+            lst[index] = res["value"]
+        self.config_data["app_exclusions"] = lst
+        self._save_config()
+        self._refresh_exclusions_ui()
+
+    def on_delete_app(self):
+        try:
+            idx = self.app_list.curselection()[0]
+        except IndexError:
+            messagebox.showerror(APP_TITLE, "Выбери программу в списке.")
+            return
+        lst = self.config_data.get("app_exclusions", [])
+        if idx >= len(lst):
+            return
+        del lst[idx]
+        self.config_data["app_exclusions"] = lst
+        self._save_config()
+        self._refresh_exclusions_ui()
+
+    def on_manage_exclusions(self):
+        messagebox.showinfo(
+            APP_TITLE,
+            "Список исключений показан в этом блоке.\n"
+            "Добавить: кнопки сверху.\n"
+            "Редактировать/удалить: выбери элемент и используй кнопки ✎ / ✖.",
+        )
+
+    # ---------- connect / disconnect ----------
+
+    def on_toggle(self):
+        if self.proc and self.proc.poll() is None:
+            self.disconnect()
+        else:
+            self.connect()
+
+    def connect(self):
+        profiles = self._get_profiles()
+        if not profiles:
+            messagebox.showerror(APP_TITLE, "Сначала создай профиль с подпиской.")
+            return
+        if (
+            self.current_profile_index is None
+            or self.current_profile_index >= len(profiles)
+        ):
+            messagebox.showerror(APP_TITLE, "Выбери профиль.")
+            return
+
+        profile = profiles[self.current_profile_index]
+        if not profile.url.strip():
+            messagebox.showerror(APP_TITLE, "У профиля нет URL подписки.")
+            return
+
+        sing_box_exe = self.base_dir / "sing-box.exe"
+        if not sing_box_exe.exists():
+            messagebox.showerror(
+                APP_TITLE, "Не найден sing-box.exe рядом с программой."
             )
-            if not path:
+            return
+
+        self.toggle_btn.configure(state="disabled")
+        self.btn_tun_on.configure(state="disabled")
+        self.btn_tun_off.configure(state="disabled")
+        self.append_log(
+            f"\n=== Подключение к профилю: {profile.name} ===\n"
+        )
+        self.set_status("подключение...", "orange")
+
+        t = threading.Thread(
+            target=self._connect_worker,
+            args=(profile.url, self.base_dir, sing_box_exe, self.current_profile_index),
+            daemon=True,
+        )
+        t.start()
+
+    def _update_profile_info_from_vless(self, idx, vless_url):
+        try:
+            u = urlparse(vless_url)
+            server = u.hostname or ""
+            port = u.port or 443
+            remark = unquote(u.fragment) if u.fragment else ""
+            profiles = self._get_profiles()
+            if idx is None or idx < 0 or idx >= len(profiles):
                 return
-            try:
-                img = Image.open(path)
-                codes = decode(img)
-                if not codes:
-                    dark_showerror(APP_TITLE, "QR-код не найден на изображении.")
-                    return
-                data = codes[0].data.decode("utf-8")
-                sub_var.set(data)
-                dark_showinfo(APP_TITLE, "Ссылка из QR успешно считана.")
-            except Exception as e:
-                dark_showerror(APP_TITLE, f"Ошибка чтения QR: {e}")
-
-        ttk.Button(btn_frame, text="Из QR", command=on_from_qr).pack(side="left")
-        ttk.Button(btn_frame, text="Отмена", command=on_cancel).pack(
-            side="right", padx=4
-        )
-        ttk.Button(btn_frame, text="OK", command=on_ok).pack(side="right")
-
-        dialog.grab_set()
-        name_entry.focus_set()
-        self.wait_window(dialog)
-
-    # ---------- парсинг подписки / конфиг ----------
-
-    def _parse_sub_link(self, sub_url: str):
-        try:
-            if sub_url.strip().startswith("vless://"):
-                return self._parse_single_vless(sub_url.strip())
-
-            if "://" not in sub_url:
-                with open(sub_url, "r", encoding="utf-8") as f:
-                    first = f.read().strip()
-                if first.startswith("vless://"):
-                    return self._parse_single_vless(first)
-                sub_url = first
-
-            parsed = urlparse(sub_url)
-            if parsed.scheme in ("http", "https"):
-                resp = urllib.request.urlopen(sub_url, timeout=10)
-                data = resp.read().decode("utf-8", errors="ignore").strip()
-            else:
-                data = sub_url.strip()
-
-            try:
-                raw = base64.b64decode(data).decode("utf-8", errors="ignore")
-            except Exception:
-                raw = data
-
-            lines = [ln.strip() for ln in raw.splitlines() if ln.strip()]
-            vless_lines = [ln for ln in lines if ln.startswith("vless://")]
-            if not vless_lines:
-                raise ValueError("Не найдены vless:// строки в подписке.")
-            return self._parse_single_vless(vless_lines[0])
-        except Exception as e:
-            raise ValueError(f"Не удалось разобрать подписку: {e}") from e
-
-    def _parse_single_vless(self, link: str):
-        if not link.startswith("vless://"):
-            raise ValueError("Строка не является VLESS URL.")
-        without_scheme = link[len("vless://") :]
-        userinfo, rest = without_scheme.split("@", 1)
-        user_id = userinfo.split(":")[0]
-
-        if "#" in rest:
-            rest, remark = rest.split("#", 1)
-            remark = unquote(remark)
-        else:
-            remark = ""
-
-        if "?" in rest:
-            hostport, query = rest.split("?", 1)
-        else:
-            hostport, query = rest, ""
-        if ":" not in hostport:
-            raise ValueError("Нет порта в адресе VLESS.")
-        host, port = hostport.split(":", 1)
-
-        q = parse_qs(query)
-        encryption = q.get("encryption", ["none"])[0]
-        flow = q.get("flow", [""])[0]
-        security = q.get("security", ["none"])[0]
-        sni = q.get("sni", [""])[0]
-        network = q.get("type", ["tcp"])[0]
-
-        return {
-            "id": user_id,
-            "host": host,
-            "port": int(port),
-            "remark": remark,
-            "encryption": encryption,
-            "flow": flow,
-            "security": security,
-            "sni": sni,
-            "network": network,
-        }
-
-    def _build_singbox_config(self, vless, exclusions: Exclusions):
-        server_addr = vless["host"]
-        server_port = vless["port"]
-        user_id = vless["id"]
-        security = vless["security"]
-        sni = vless["sni"]
-        flow = vless["flow"]
-
-        tun_addr = "172.19.0.2/30"
-
-        inbound_tun = {
-            "type": "tun",
-            "tag": "tun-in",
-            "inet4_address": [tun_addr],
-            "mtu": 9000,
-            "auto_route": True,
-            "strict_route": True,
-            "stack": "gvisor",
-            "sniff": True,
-            "sniff_override_destination": True,
-        }
-
-        # legacy DNS – даёт только WARN, но не FATAL
-        dns = {
-            "servers": [
-                {
-                    "tag": "local",
-                    "address": "udp://8.8.8.8",
-                    "detour": "proxy-out",
-                }
-            ],
-            "strategy": "ipv4_only",
-            "disable_cache": False,
-        }
-
-        # VLESS без transport/fingerprint и других новых фич
-        outbound_proxy = {
-            "type": "vless",
-            "tag": "proxy-out",
-            "server": server_addr,
-            "server_port": server_port,
-            "uuid": user_id,
-            "flow": flow or "",
-            "packet_encoding": "xudp",
-            "tls": {
-                "enabled": security == "reality",
-                "server_name": sni or server_addr,
-                "reality": {
-                    "enabled": security == "reality",
-                    "public_key": "",
-                    "short_id": "",
-                },
-            },
-        }
-
-        outbound_direct = {"type": "direct", "tag": "direct"}
-        outbound_dns = {"type": "dns", "tag": "dns-out"}
-        outbound_block = {"type": "block", "tag": "block"}
-
-        rules = [
-            # DNS всегда в dns-out
-            {"protocol": "dns", "outbound": "dns-out"},
-        ]
-
-        # Режим РФ: все домены *.ru – напрямую
-        if exclusions.ru_mode:
-            rules.append({
-                "domain_suffix": ["ru"],
-                "outbound": "direct",
-            })
-
-        # Исключения – сайты
-        for site in exclusions.sites:
-            host = site.strip()
-            if not host:
-                continue
-            rules.append({
-                "domain": [host],
-                "outbound": "direct",
-            })
-
-        # Исключения – программы
-        for app in exclusions.apps:
-            exe_name = os.path.basename(app)
-            rules.append({
-                "process_name": exe_name,
-                "outbound": "direct",
-            })
-
-        # Адрес сервера сам не должен идти через туннель
-        try:
-            socket.inet_aton(server_addr)
-            rules.append({
-                "ip_cidr": [f"{server_addr}/32"],
-                "outbound": "direct",
-            })
-        except OSError:
-            rules.append({
-                "domain": [server_addr],
-                "outbound": "direct",
-            })
-
-        config = {
-            "log": {
-                "level": "info",
-            },
-            "dns": dns,
-            "inbounds": [inbound_tun],
-            "outbounds": [outbound_proxy, outbound_direct, outbound_dns, outbound_block],
-            "route": {
-                "rules": rules,
-            },
-        }
-        return config
-
-
-
-    # ---------- запуск / остановка sing-box ----------
-
-    def on_tun_on(self):
-        if self.sing_box_running:
-            return
-        if not self.current_profile:
-            messagebox.showwarning(APP_TITLE, "Сначала создайте и выберите профиль.")
-            return
-        if not self.sing_box_path.exists():
-            messagebox.showerror(APP_TITLE, f"Не найден {SING_BOX_EXE} рядом с программой.")
-            return
-
-        try:
-            vless = self._parse_sub_link(self.current_profile.sub_url)
-        except Exception as e:
-            messagebox.showerror(APP_TITLE, str(e))
-            return
-
-        self.current_profile.type = "VLESS"
-        self.current_profile.address = f'{vless["host"]}:{vless["port"]}'
-        self.current_profile.remark = vless["remark"]
-        self._save_profiles()
-        self._update_profile_info()
-
-        config = self._build_singbox_config(vless, self.exclusions)
-        try:
-            with open(self.config_path, "w", encoding="utf-8") as f:
-                json.dump(config, f, ensure_ascii=False, indent=2)
-        except Exception as e:
-            messagebox.showerror(APP_TITLE, f"Не удалось записать config.json: {e}")
-            return
-
-        self.log_text.configure(state="normal")
-        self.log_text.delete("1.0", "end")
-        self.log_text.configure(state="disabled")
-
-        self.sing_box_running = True
-        self._update_status_view()
-
-        def log_cb(line):
-            self.after(0, self._append_log, line)
-
-        def on_exit():
-            self.after(0, self._on_singbox_exit)
-
-        self.runner = SingBoxRunner(
-            str(self.sing_box_path),
-            str(self.config_path),
-            log_cb,
-            on_exit,
-        )
-        self.runner.start()
-
-        threading.Thread(target=self._update_public_ip, daemon=True).start()
-
-    def _on_singbox_exit(self):
-        self.sing_box_running = False
-        self.runner = None
-        self._update_status_view()
-        self._set_ip("-")
-
-    def _update_public_ip(self):
-        try:
-            with urllib.request.urlopen(
-                "https://api.ipify.org?format=text", timeout=10
-            ) as r:
-                ip = r.read().decode().strip()
+            p = profiles[idx]
+            p.ptype = "VLESS"
+            p.address = f"{server}:{port}"
+            p.remark = remark
+            self._set_profiles(profiles)
+            self._refresh_profile_info_ui()
         except Exception:
-            ip = "-"
-        self.after(0, self._set_ip, ip)
+            pass
 
-    def on_tun_off(self):
-        if self.runner:
-            self.runner.stop()
-        else:
-            self.sing_box_running = False
-            self._update_status_view()
-            self._set_ip("-")
+    def _connect_worker(self, url: str, base_dir: Path, sing_box_exe: Path, idx: int):
+        try:
+            self.append_log("Скачиваю подписку...\n")
+            with urllib.request.urlopen(url) as resp:
+                sub_bytes = resp.read()
+
+            vless = decode_subscription_to_vless(sub_bytes)
+            self.append_log(f"VLESS: {vless}\n")
+
+            # обновим инфо по профилю
+            self.after(0, lambda: self._update_profile_info_from_vless(idx, vless))
+
+            cfg_dict = build_singbox_config(
+                vless_url=vless,
+                ru_mode=self.config_data.get("ru_mode", True),
+                site_excl=self.config_data.get("site_exclusions", []),
+                app_excl=self.config_data.get("app_exclusions", []),
+            )
+            cfg_path = base_dir / "config.json"
+            cfg_path.write_text(
+                json.dumps(cfg_dict, ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
+            self.append_log("config.json сгенерирован.\n")
+
+            self.append_log("Запускаю sing-box...\n")
+            env = os.environ.copy()
+            env["ENABLE_DEPRECATED_TUN_ADDRESS_X"] = "true"
+            env["ENABLE_DEPRECATED_DNS_SERVER_FORMAT"] = "true"
+            env["ENABLE_DEPRECATED_SPECIAL_OUTBOUNDS"] = "true"
+
+            creationflags = 0
+            startupinfo = None
+            if os.name == "nt":
+                creationflags = subprocess.CREATE_NO_WINDOW
+                startupinfo = subprocess.STARTUPINFO()
+                startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+
+            self.proc = subprocess.Popen(
+                [str(sing_box_exe), "run", "-c", str(cfg_path)],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                env=env,
+                creationflags=creationflags,
+                startupinfo=startupinfo,
+            )
+
+            self.stop_log.clear()
+            self.log_thread = threading.Thread(
+                target=self._log_reader, daemon=True
+            )
+            self.log_thread.start()
+
+            self.after(0, self._on_connected_ok)
+
+        except Exception as e:
+            err = f"Ошибка подключения: {e}\n"
+            self.after(0, lambda: self.append_log(err))
+            self.after(0, lambda: self.set_status("ошибка", "red"))
+            self.after(
+                0,
+                lambda: (
+                    self.toggle_btn.configure(state="normal"),
+                    self.btn_tun_on.configure(state="normal"),
+                    self.btn_tun_off.configure(state="disabled"),
+                ),
+            )
+
+    def _on_connected_ok(self):
+        self.set_status("подключен", "green")
+        self.toggle_var.set("Отключить")
+        self.toggle_btn.configure(state="normal")
+        self.btn_tun_on.configure(state="disabled")
+        self.btn_tun_off.configure(state="normal")
+
+    def _log_reader(self):
+        if not self.proc or not self.proc.stdout:
+            return
+        for line in self.proc.stdout:
+            if self.stop_log.is_set():
+                break
+            self.after(0, lambda l=line: self.append_log(l))
+        self.after(0, self._on_process_exit)
+
+    def _on_process_exit(self):
+        if self.proc and self.proc.poll() is not None:
+            code = self.proc.returncode
+            self.append_log(f"\nsing-box завершился с кодом {code}\n")
+        self.proc = None
+        self.stop_log.set()
+        self.set_status("отключен", "red")
+        self.toggle_var.set("Подключить")
+        self.toggle_btn.configure(state="normal")
+        self.btn_tun_on.configure(state="normal")
+        self.btn_tun_off.configure(state="disabled")
+
+    def disconnect(self):
+        if not self.proc or self.proc.poll() is not None:
+            self.append_log("\nУже отключен.\n")
+            self.proc = None
+            self.stop_log.set()
+            self.set_status("отключен", "red")
+            self.toggle_var.set("Подключить")
+            self.toggle_btn.configure(state="normal")
+            self.btn_tun_on.configure(state="normal")
+            self.btn_tun_off.configure(state="disabled")
+            return
+
+        self.append_log("\n=== Отключение... ===\n")
+        self.set_status("отключение...", "orange")
+        self.toggle_btn.configure(state="disabled")
+        self.btn_tun_on.configure(state="disabled")
+        self.btn_tun_off.configure(state="disabled")
+
+        t = threading.Thread(target=self._disconnect_worker, daemon=True)
+        t.start()
+
+    def _disconnect_worker(self):
+        try:
+            if self.proc and self.proc.poll() is None:
+                try:
+                    self.proc.terminate()
+                except Exception:
+                    pass
+
+                try:
+                    self.proc.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    self.append_log(
+                        "sing-box не завершился, принудительное завершение...\n"
+                    )
+                    try:
+                        self.proc.kill()
+                    except Exception:
+                        pass
+
+            self.stop_log.set()
+        finally:
+            self.after(0, self._on_disconnected_manual)
+
+    def _on_disconnected_manual(self):
+        self.proc = None
+        self.set_status("отключен", "red")
+        self.toggle_var.set("Подключить")
+        self.toggle_btn.configure(state="normal")
+        self.btn_tun_on.configure(state="normal")
+        self.btn_tun_off.configure(state="disabled")
+        self.append_log("Туннель остановлен.\n")
+
+    # ---------- закрытие окна ----------
+
+    def on_close(self):
+        if self.proc and self.proc.poll() is not None:
+            try:
+                self.append_log(
+                    "\n=== Закрытие приложения, отключаю VPN... ===\n"
+                )
+            except Exception:
+                pass
+            try:
+                self.proc.terminate()
+                self.proc.wait(timeout=3)
+            except Exception:
+                try:
+                    self.proc.kill()
+                except Exception:
+                    pass
+
+        self.stop_log.set()
+        self.destroy()
+
+
+def main():
+    app = VlfGui()
+    app.mainloop()
 
 
 if __name__ == "__main__":
-    app = VlfGui()
-    app.mainloop()
+    main()

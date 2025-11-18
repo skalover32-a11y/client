@@ -1,0 +1,114 @@
+{
+  "log": {
+    "level": "info"
+  },
+  "dns": {
+    "servers": [
+      {
+        "tag": "local",
+        "address": "udp://8.8.8.8",
+        "detour": "proxy-out"
+      }
+    ],
+    "strategy": "ipv4_only",
+    "disable_cache": false
+  },
+  "inbounds": [
+    {
+      "type": "tun",
+      "tag": "tun-in",
+      "inet4_address": [
+        "172.19.0.2/30"
+      ],
+      "mtu": 9000,
+      "auto_route": true,
+      "strict_route": true,
+      "stack": "gvisor",
+      "sniff": true,
+      "sniff_override_destination": true
+    },
+    {
+      "type": "direct",
+      "tag": "dns-in"
+    }
+  ],
+  "outbounds": [
+    {
+      "type": "vless",
+      "tag": "proxy-out",
+      "server": "troynichek-live.ru",
+      "server_port": 10745,
+      "uuid": "cc0bf5d6-f57d-4969-ae07-5954b5aeac64",
+      "flow": "xtls-rprx-vision",
+      "packet_encoding": "xudp",
+      "tls": {
+        "enabled": true,
+        "server_name": "caprover.com",
+        "fingerprint": "random",
+        "alpn": [],
+        "reality": {
+          "enabled": true,
+          "public_key": "",
+          "short_id": ""
+        }
+      },
+      "transport": {
+        "type": "tcp"
+      }
+    },
+    {
+      "type": "direct",
+      "tag": "direct"
+    },
+    {
+      "type": "dns",
+      "tag": "dns-out"
+    },
+    {
+      "type": "block",
+      "tag": "block"
+    }
+  ],
+  "route": {
+    "rules": [
+      {
+        "protocol": "dns",
+        "outbound": "dns-out"
+      },
+      {
+        "rule_set": [
+          "geoip-ru"
+        ],
+        "outbound": "direct"
+      },
+      {
+        "rule_set": [
+          "geosite-ru"
+        ],
+        "outbound": "direct"
+      },
+      {
+        "domain": [
+          "troynichek-live.ru"
+        ],
+        "outbound": "direct"
+      }
+    ],
+    "rule_set": [
+      {
+        "tag": "geoip-ru",
+        "type": "geoip",
+        "country_code": [
+          "RU"
+        ]
+      },
+      {
+        "tag": "geosite-ru",
+        "type": "geosite",
+        "domain": [
+          "geosite:category-ru"
+        ]
+      }
+    ]
+  }
+}
