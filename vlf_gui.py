@@ -46,8 +46,6 @@ class Profile:
         self.address = address  # host:port
         self.remark = remark    # имя/label из #fragment
 
-        # Для возможных будущих полей легко расширять
-
     def to_dict(self):
         return {
             "name": self.name,
@@ -177,13 +175,14 @@ def build_singbox_config(vless_url: str, ru_mode: bool, site_excl, app_excl):
 
     route = {"auto_detect_interface": True, "rules": rules, "final": "proxy-out"}
 
+    # DNS через VPN: запросы уходят по proxy-out, а не напрямую
     dns = {
         "servers": [
             {
-                "tag": "dns-direct",
+                "tag": "dns-remote",
                 "address": "1.1.1.1",
                 "address_strategy": "prefer_ipv4",
-                "detour": "direct",
+                "detour": "proxy-out",
             }
         ]
     }
@@ -218,7 +217,13 @@ class VlfGui(tk.Tk):
     def __init__(self):
         super().__init__()
 
-        self.base_dir = Path(sys.argv[0]).resolve().parent
+        # База для sing-box.exe и config.json:
+        #   - в собранном .exe → sys._MEIPASS (PyInstaller)
+        #   - в исходниках → папка, где лежит vlf_gui.py
+        if getattr(sys, "frozen", False) and hasattr(sys, "_MEIPASS"):
+            self.base_dir = Path(sys._MEIPASS)
+        else:
+            self.base_dir = Path(__file__).resolve().parent
 
         icon_path = self.base_dir / "vlf.ico"
         if icon_path.exists():
@@ -243,13 +248,13 @@ class VlfGui(tk.Tk):
         self.log_thread: threading.Thread | None = None
         self.stop_log = threading.Event()
 
-        self.logo_img_small = None
-        self.logo_label = None
-
         # Переменные для инфо по профилю
         self.profile_type_var = tk.StringVar(value="")
         self.profile_addr_var = tk.StringVar(value="")
         self.profile_name_var = tk.StringVar(value="")
+
+        # Новый вар для IP
+        self.ip_var = tk.StringVar(value="IP: -")
 
         self._build_ui()
         self._load_config()
@@ -260,6 +265,7 @@ class VlfGui(tk.Tk):
     # ---------- конфиг GUI ----------
 
     def _load_config(self):
+        # vlf_gui_config.json храним рядом с EXE (текущий рабочий каталог)
         path = Path(CONFIG_FILE)
         if not path.exists():
             return
@@ -279,20 +285,6 @@ class VlfGui(tk.Tk):
             pass
 
     # ---------- UI helpers ----------
-
-    def _load_logo_image_small(self):
-        if not (Image and ImageTk):
-            return
-        for name in ["vlf_button_off.png", "vlf_logo.png", "vlf_256.png"]:
-            p = self.base_dir / name
-            if p.exists():
-                try:
-                    img = Image.open(p)
-                    img = img.resize((56, 56), Image.LANCZOS)
-                    self.logo_img_small = ImageTk.PhotoImage(img)
-                    return
-                except Exception:
-                    continue
 
     def _create_pill_button(self, parent, text, bg, command=None, state="normal"):
         btn = tk.Button(
@@ -417,26 +409,17 @@ class VlfGui(tk.Tk):
         )
         self.btn_proxy.pack(side="left")
 
-        # Правая часть шапки – колонка с логотипом и @ботом
+        # Правая часть шапки – просто надпись VLF
         right_header = tk.Frame(header, bg=COLOR_BG)
         right_header.pack(side="right", padx=0, pady=4)
 
-        self._load_logo_image_small()
-        if self.logo_img_small is not None:
-            self.logo_label = tk.Label(
-                right_header,
-                image=self.logo_img_small,
-                bg=COLOR_BG,
-                bd=0,
-            )
-        else:
-            self.logo_label = tk.Label(
-                right_header,
-                text="VLF",
-                bg=COLOR_BG,
-                fg=COLOR_ACCENT,
-                font=("Segoe UI", 18, "bold"),
-            )
+        self.logo_label = tk.Label(
+            right_header,
+            text="VLF",
+            bg=COLOR_BG,
+            fg=COLOR_ACCENT,
+            font=("Segoe UI", 18, "bold"),
+        )
         self.logo_label.pack(anchor="center", pady=(0, 2))
 
         self.bot_label = tk.Label(
@@ -467,6 +450,15 @@ class VlfGui(tk.Tk):
             anchor="center",
         )
         self.status_lbl.pack()
+
+        # новый лейбл IP под статусом
+        self.ip_lbl = ttk.Label(
+            status_frame,
+            textvariable=self.ip_var,
+            style="Status.TLabel",
+            anchor="center",
+        )
+        self.ip_lbl.pack()
 
         # ---- Центр: профили + исключения ----
         center = ttk.Frame(main, style="TFrame")
@@ -528,7 +520,7 @@ class VlfGui(tk.Tk):
         self.profile_list.pack(fill="both", expand=True, padx=1, pady=1)
         self.profile_list.bind("<<ListboxSelect>>", self.on_profile_list_select)
 
-        # Информация о выбранном профиле (как в Nekobox)
+        # Информация о выбранном профиле
         info_frame = tk.Frame(left_panel, bg=COLOR_PANEL)
         info_frame.pack(fill="x", padx=8, pady=(0, 8))
 
@@ -575,11 +567,6 @@ class VlfGui(tk.Tk):
             style="Accent.TButton",
             command=self.on_add_app,
         ).pack(side="left", padx=2)
-
-        self.btn_manager = self._create_pill_button(
-            exc_top, "Менеджер", GRAY_BTN, command=self.on_manage_exclusions
-        )
-        self.btn_manager.pack(side="right", padx=2)
 
         # Сайты
         sites_frame = tk.Frame(right_panel, bg=COLOR_PANEL)
@@ -704,6 +691,21 @@ class VlfGui(tk.Tk):
     def set_status(self, text: str, color: str):
         self.status_var.set(text)
         self.status_lbl.configure(foreground=color)
+
+    def _update_ip_async(self):
+        """Обновить IP в отдельном потоке, чтобы не блокировать GUI."""
+        def worker():
+            ip = "-"
+            try:
+                with urllib.request.urlopen(
+                    "https://api.ipify.org?format=text", timeout=10
+                ) as r:
+                    ip = r.read().decode().strip()
+            except Exception:
+                pass
+            self.after(0, lambda: self.ip_var.set(f"IP: {ip}"))
+
+        threading.Thread(target=worker, daemon=True).start()
 
     # ---------- profiles ----------
 
@@ -1308,6 +1310,8 @@ class VlfGui(tk.Tk):
         self.toggle_btn.configure(state="normal")
         self.btn_tun_on.configure(state="disabled")
         self.btn_tun_off.configure(state="normal")
+        # обновляем IP при успешном подключении
+        self._update_ip_async()
 
     def _log_reader(self):
         if not self.proc or not self.proc.stdout:
@@ -1329,6 +1333,7 @@ class VlfGui(tk.Tk):
         self.toggle_btn.configure(state="normal")
         self.btn_tun_on.configure(state="normal")
         self.btn_tun_off.configure(state="disabled")
+        self.ip_var.set("IP: -")
 
     def disconnect(self):
         if not self.proc or self.proc.poll() is not None:
@@ -1337,9 +1342,10 @@ class VlfGui(tk.Tk):
             self.stop_log.set()
             self.set_status("отключен", "red")
             self.toggle_var.set("Подключить")
-            self.toggle_btn.configure(state="normal")
             self.btn_tun_on.configure(state="normal")
             self.btn_tun_off.configure(state="disabled")
+            self.toggle_btn.configure(state="normal")
+            self.ip_var.set("IP: -")
             return
 
         self.append_log("\n=== Отключение... ===\n")
@@ -1381,6 +1387,7 @@ class VlfGui(tk.Tk):
         self.toggle_btn.configure(state="normal")
         self.btn_tun_on.configure(state="normal")
         self.btn_tun_off.configure(state="disabled")
+        self.ip_var.set("IP: -")
         self.append_log("Туннель остановлен.\n")
 
     # ---------- закрытие окна ----------

@@ -1,35 +1,28 @@
 {
   "log": {
-    "level": "info"
+    "level": "info",
+    "timestamp": true
   },
   "dns": {
     "servers": [
       {
-        "tag": "local",
-        "address": "udp://8.8.8.8",
-        "detour": "proxy-out"
+        "tag": "dns-direct",
+        "address": "1.1.1.1",
+        "address_strategy": "prefer_ipv4",
+        "detour": "direct"
       }
-    ],
-    "strategy": "ipv4_only",
-    "disable_cache": false
+    ]
   },
   "inbounds": [
     {
       "type": "tun",
       "tag": "tun-in",
-      "inet4_address": [
-        "172.19.0.2/30"
-      ],
-      "mtu": 9000,
+      "interface_name": "vlf_tun",
+      "mtu": 1500,
+      "inet4_address": "172.19.0.1/28",
       "auto_route": true,
       "strict_route": true,
-      "stack": "gvisor",
-      "sniff": true,
-      "sniff_override_destination": true
-    },
-    {
-      "type": "direct",
-      "tag": "dns-in"
+      "sniff": true
     }
   ],
   "outbounds": [
@@ -39,22 +32,21 @@
       "server": "troynichek-live.ru",
       "server_port": 10745,
       "uuid": "cc0bf5d6-f57d-4969-ae07-5954b5aeac64",
-      "flow": "xtls-rprx-vision",
-      "packet_encoding": "xudp",
+      "network": "tcp",
       "tls": {
         "enabled": true,
         "server_name": "caprover.com",
-        "fingerprint": "random",
-        "alpn": [],
+        "utls": {
+          "enabled": true,
+          "fingerprint": "random"
+        },
         "reality": {
           "enabled": true,
-          "public_key": "",
-          "short_id": ""
+          "public_key": "8xDmZ6DBcNQg5c5DHbUDY6zvaBoe0tU2_hvToLFimw0",
+          "short_id": "affec5136768ec"
         }
       },
-      "transport": {
-        "type": "tcp"
-      }
+      "flow": "xtls-rprx-vision"
     },
     {
       "type": "direct",
@@ -70,45 +62,35 @@
     }
   ],
   "route": {
+    "auto_detect_interface": true,
     "rules": [
       {
         "protocol": "dns",
         "outbound": "dns-out"
       },
       {
-        "rule_set": [
-          "geoip-ru"
+        "ip_cidr": [
+          "45.66.163.55/32"
         ],
         "outbound": "direct"
       },
       {
-        "rule_set": [
-          "geosite-ru"
+        "domain_suffix": [
+          "ru",
+          "su",
+          "рф"
         ],
         "outbound": "direct"
       },
       {
-        "domain": [
-          "troynichek-live.ru"
-        ],
+        "process_name": "dota2.exe",
+        "outbound": "direct"
+      },
+      {
+        "process_name": "steam.exe",
         "outbound": "direct"
       }
     ],
-    "rule_set": [
-      {
-        "tag": "geoip-ru",
-        "type": "geoip",
-        "country_code": [
-          "RU"
-        ]
-      },
-      {
-        "tag": "geosite-ru",
-        "type": "geosite",
-        "domain": [
-          "geosite:category-ru"
-        ]
-      }
-    ]
+    "final": "proxy-out"
   }
 }

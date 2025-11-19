@@ -4,7 +4,7 @@
 a = Analysis(
     ['vlf_gui.py'],
     pathex=[],
-    binaries=[],
+    binaries=[('sing-box.exe', '.'), ('wintun.dll', '.')],
     datas=[],
     hiddenimports=[],
     hookspath=[],
@@ -35,4 +35,5 @@ exe = EXE(
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
+    icon=['vlf.ico'],
 )
