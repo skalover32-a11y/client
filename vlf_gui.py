@@ -1,5 +1,5 @@
 import tkinter as tk
-from tkinter import ttk, filedialog
+from tkinter import ttk, filedialog, messagebox as tk_messagebox
 import json
 import subprocess
 import threading
@@ -15,13 +15,13 @@ import webbrowser
 import dark_messagebox as messagebox  # тёмные messagebox'ы
 
 # Цвета (nekobox-style)
-COLOR_BG = "#101421"
-COLOR_PANEL = "#151a24"
-COLOR_ACCENT = "#00C6FF"
-COLOR_TEXT = "#E5E7EB"
+COLOR_BG = "#262424"
+COLOR_PANEL = "#1a1717"
+COLOR_ACCENT = "#289eb0"
+COLOR_TEXT = "#d4d2d2"
 
 GREEN_BTN = "#16a34a"
-RED_BTN = "#dc2626"
+RED_BTN = "#b02828"
 GRAY_BTN = "#4b5563"
 
 try:
@@ -34,7 +34,7 @@ except Exception:
     qr_decode = None
     QR_AVAILABLE = False
 
-APP_TITLE = "VLF VPN по подписке"
+APP_TITLE = "VLF VPN Tunnel client"
 CONFIG_FILE = "vlf_gui_config.json"
 
 
@@ -100,7 +100,7 @@ def decode_subscription_to_vless(sub_bytes: bytes) -> str:
 
 
 def build_singbox_config(vless_url: str, ru_mode: bool, site_excl, app_excl):
-    """На основе одной VLESS-ссылки собираем config.json для sing-box."""
+    """На основе одной VLESS-ссылки собираем config.json для sing-box (логика из рабочего файла)."""
     u = urlparse(vless_url)
     if u.scheme != "vless":
         raise ValueError("Not a vless:// URL")
@@ -151,6 +151,7 @@ def build_singbox_config(vless_url: str, ru_mode: bool, site_excl, app_excl):
     outbound_dns = {"type": "dns", "tag": "dns-out"}
     outbound_block = {"type": "block", "tag": "block"}
 
+    # Базовые правила маршрутизации — как в рабочем варианте
     rules = [
         {"protocol": "dns", "outbound": "dns-out"},
     ]
@@ -162,31 +163,40 @@ def build_singbox_config(vless_url: str, ru_mode: bool, site_excl, app_excl):
     except Exception:
         pass
 
+    # RU-режим
     if ru_mode:
         rules.append(
             {"domain_suffix": ["ru", "su", "рф"], "outbound": "direct"}
         )
 
+    # Исключения по доменам
     if site_excl:
         rules.append({"domain": site_excl, "outbound": "direct"})
 
+    # Исключения по процессам
     for name in app_excl:
         rules.append({"process_name": name, "outbound": "direct"})
 
-    route = {"auto_detect_interface": True, "rules": rules, "final": "proxy-out"}
+    route = {
+        "auto_detect_interface": True,
+        "rules": rules,
+        "final": "proxy-out",
+    }
 
-    # DNS через VPN: запросы уходят по proxy-out, а не напрямую
+    # DNS как в старом рабочем файле:
+    # 1.1.1.1, через direct, без DoH и без detour на proxy-out
     dns = {
         "servers": [
             {
-                "tag": "dns-remote",
+                "tag": "dns-direct",
                 "address": "1.1.1.1",
                 "address_strategy": "prefer_ipv4",
-                "detour": "proxy-out",
+                "detour": "direct",
             }
         ]
     }
 
+    # TUN в старом формате (inet4_address) + авто-маршрутизация
     inbound_tun = {
         "type": "tun",
         "tag": "tun-in",
@@ -211,6 +221,16 @@ def build_singbox_config(vless_url: str, ru_mode: bool, site_excl, app_excl):
         "route": route,
     }
     return config
+
+
+
+
+
+
+
+
+
+
 
 
 class VlfGui(tk.Tk):
@@ -664,7 +684,7 @@ class VlfGui(tk.Tk):
         self.log_text = tk.Text(
             log_frame,
             wrap="none",
-            bg="#0b0f1a",
+            bg="#1a1717",
             fg=COLOR_TEXT,
             insertbackground=COLOR_TEXT,
             relief="flat",
@@ -945,8 +965,20 @@ class VlfGui(tk.Tk):
         ):
             messagebox.showerror(APP_TITLE, "Сначала выбери профиль.")
             return
-        if not messagebox.askyesno(APP_TITLE, "Удалить выбранный профиль?"):
+
+        # dark_messagebox может не иметь askyesno — подстрахуемся стандартным
+        try:
+            answer = messagebox.askyesno(
+                APP_TITLE, "Удалить выбранный профиль?"
+            )
+        except AttributeError:
+            answer = tk_messagebox.askyesno(
+                APP_TITLE, "Удалить выбранный профиль?"
+            )
+
+        if not answer:
             return
+
         del profiles[self.current_profile_index]
         self.current_profile_index = 0 if profiles else None
         self._set_profiles(profiles)

@@ -35,7 +35,7 @@
       "network": "tcp",
       "tls": {
         "enabled": true,
-        "server_name": "caprover.com",
+        "server_name": "www.caprover.com",
         "utls": {
           "enabled": true,
           "fingerprint": "random"
@@ -43,7 +43,7 @@
         "reality": {
           "enabled": true,
           "public_key": "8xDmZ6DBcNQg5c5DHbUDY6zvaBoe0tU2_hvToLFimw0",
-          "short_id": "e631ee48b0bccb89"
+          "short_id": "35f6"
         }
       },
       "flow": "xtls-rprx-vision"
