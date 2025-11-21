@@ -1,0 +1,14 @@
+{
+  "profiles": [
+    {
+      "name": "fin",
+      "url": "https://troynichek-live.ru/subvlftun/f761a39dd58742ba91f20462398edc25",
+      "ptype": "VLESS",
+      "address": "troynichek-live.ru:10745",
+      "remark": "vlfFIN-249717973@bot"
+    }
+  ],
+  "ru_mode": true,
+  "site_exclusions": [],
+  "app_exclusions": []
+}
